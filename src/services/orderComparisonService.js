@@ -340,7 +340,7 @@ async function fetchSystemOrdersBatch(orderCodes, minDate, maxDate, timeoutMs = 
         t.order_id,
         COALESCE(SUM(tp.load_qty), 0) as ticketed_qty
       FROM tickets t
-      JOIN ticket_products tp ON tp.ticket_id = t.id AND tp.is_mix = true
+      JOIN ticket_products tp ON tp.ticket_id = t.ticket_id AND tp.is_mix = true
       WHERE t.remove_reason_code IS NULL OR TRIM(t.remove_reason_code) = ''
       GROUP BY t.order_id
     ),

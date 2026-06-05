@@ -1154,9 +1154,282 @@ async function sendComparisonEmail(comparisonSummary, fullComparisonResult, reva
   }
 }
 
+/**
+ * ============================================================================
+ * LITE email (Connex extension flow) — fully separate from the main email above.
+ * Does NOT touch formatEmailBody / sendComparisonEmail. Slim, problems-only.
+ * ============================================================================
+ */
+
+function escHtml(s) {
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function liteQty(v) {
+  const n = parseFloat(v);
+  return isNaN(n) ? "—" : String(Math.round(n * 100) / 100);
+}
+
+/**
+ * Build the slim lite-comparison email body.
+ * Shows Total/Matched/Mismatched/Missing + a single table of only the problem
+ * orders (mismatched + missing), Connex vs Truckast for ordered qty + status.
+ */
+function formatLiteEmailBody(summary, fullResult, opts = {}) {
+  const tenant = process.env.PRODUCER_NAME || process.env.TENANT_NAME || "Truckast";
+  const dateStr = opts.dateStr || "";
+  const perTab = opts.perTab || null;
+  const total = summary.total_external_orders || 0;
+  const matched = summary.matched_count || 0;
+  const mismatched = summary.mismatched_count || 0;
+  const missing = summary.missing_in_system_count || 0;
+
+  const mism = fullResult.mismatched_orders || [];
+  const miss = fullResult.missing_in_system_orders || [];
+  const problemCount = mism.length + miss.length;
+
+  const card = (label, value, color) => `
+    <td style="padding:0 4px;">
+      <div style="border:1px solid #e0e0e0;border-left:4px solid ${color};border-radius:6px;padding:10px 6px;text-align:center;">
+        <div style="font-size:9px;color:#666;text-transform:uppercase;letter-spacing:.5px;font-weight:600;">${label}</div>
+        <div style="font-size:22px;font-weight:700;color:${color};">${value}</div>
+      </div>
+    </td>`;
+
+  // Optional per-tab breakdown line (Active/Completed/Cancelled), rendered only
+  // when the extension forwarded metadata.perTab.
+  const perTabLine = (() => {
+    if (!perTab || typeof perTab !== "object") return "";
+    const parts = [];
+    for (const k of ["Active", "Completed", "Cancelled"]) {
+      if (perTab[k] !== undefined && perTab[k] !== null) parts.push(`${escHtml(k)} ${escHtml(perTab[k])}`);
+    }
+    return parts.length ? parts.join(" &middot; ") : "";
+  })();
+
+  const tenantLine = `<p style="margin:0 0 4px;font-size:14px;"><strong>Tenant:</strong> ${escHtml(tenant)}</p>`;
+  const providerLine = `<p style="margin:0 0 ${dateStr ? "4px" : "16px"};font-size:14px;"><strong>Provider:</strong> Connex</p>`;
+  const dateLine = dateStr
+    ? `<p style="margin:0 0 16px;font-size:13px;color:#7f8c8d;">${escHtml(dateStr)}</p>`
+    : "";
+
+  const summaryCards = `
+        <table width="100%" style="table-layout:fixed;border-collapse:separate;border-spacing:0;margin-bottom:8px;">
+          <tr>
+            ${card("Total", total, "#2c3e50")}
+            ${card("Matched", matched, "#27ae60")}
+            ${card("Mismatched", mismatched, "#f39c12")}
+            ${card("Missing", missing, "#e74c3c")}
+          </tr>
+        </table>`;
+
+  // ---- 100% Accuracy hero (everything matched) -----------------------------
+  // When there are no mismatched AND no missing orders, send a polished green
+  // "100% Accuracy" email so the client sees a perfect result at a glance.
+  if (problemCount === 0) {
+    return `
+  <!DOCTYPE html>
+  <html><head><meta charset="UTF-8"/></head>
+  <body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;background:#f5f5f5;padding:20px;color:#333;">
+    <div style="max-width:900px;margin:0 auto;background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 2px 4px rgba(0,0,0,.1);">
+      <div style="background:linear-gradient(135deg,#11998e,#38ef7d);color:#fff;padding:32px 20px;text-align:center;">
+        <div style="width:64px;height:64px;line-height:64px;margin:0 auto 12px;border-radius:50%;background:rgba(255,255,255,.2);font-size:36px;font-weight:700;">&#10003;</div>
+        <h1 style="margin:0;font-size:30px;letter-spacing:.5px;">100% Accuracy</h1>
+        <p style="margin:8px 0 0;font-size:15px;opacity:.95;">All ${total} order${total === 1 ? "" : "s"} verified &middot; perfect match</p>
+      </div>
+      <div style="padding:24px;">
+        ${tenantLine}
+        ${providerLine}
+        ${dateLine}
+        ${summaryCards}
+        <div style="margin-top:20px;padding:16px;background:#f1fef9;border:1px solid #6ceaba;border-radius:8px;color:#106a40;font-weight:600;text-align:center;">
+          &#10003; Every Connex order matched ${escHtml(tenant)} exactly on ordered quantity + status.
+        </div>
+        ${perTabLine ? `<div style="font-size:12px;color:#7f8c8d;margin-top:12px;text-align:center;">${perTabLine}</div>` : ""}
+        <div style="margin-top:28px;padding-top:16px;border-top:1px solid #e0e0e0;font-size:12px;color:#7f8c8d;text-align:center;">
+          Automated report &mdash; Connex orders compared on ordered quantity + status.
+        </div>
+      </div>
+    </div>
+  </body></html>`;
+  }
+
+  let rows = "";
+  for (const o of mism) {
+    const ext = o.external_order || o.externalOrder || {};
+    // Render ONLY the fields that actually differ (from order.differences).
+    // A matching field shows "—" (so a status-only mismatch doesn't print a
+    // confusing equal-value Ordered Qty column).
+    const diffs = {};
+    for (const d of (o.differences || [])) diffs[d.field] = d;
+
+    const cell = (field, isQty) => {
+      const d = diffs[field];
+      if (!d) return '<span style="color:#9aa3ad;">—</span>';
+      const cx = isQty ? liteQty(d.external_value) : (escHtml(d.external_value) || "—");
+      const rv = isQty ? liteQty(d.system_value) : (escHtml(d.system_value) || "—");
+      // Status diffs re-validated against Command Cloud are compared to the live
+      // Command Cloud status; everything else is compared to the Truckast DB.
+      const rightLabel = d.compare_source ? escHtml(d.compare_source) : "Truckast";
+      return (
+        '<span style="color:#b3141d;">Connex: ' + cx + '</span><br/>' +
+        '<span style="color:#198558;">' + rightLabel + ': ' + rv + '</span>'
+      );
+    };
+
+    rows += `
+      <tr>
+        <td><span style="background:#fff3cd;color:#856404;padding:3px 10px;border-radius:10px;font-size:11px;font-weight:600;">Mismatched</span></td>
+        <td>${escHtml(ext.order_code)}</td>
+        <td>${formatDateToMMDDYYYY(ext.order_date)}</td>
+        <td style="${diffs.ordered_qty ? "background:#fff5f5;" : ""}">${cell("ordered_qty", true)}</td>
+        <td style="${diffs.status ? "background:#fff5f5;" : ""}">${cell("status", false)}</td>
+      </tr>`;
+  }
+  for (const o of miss) {
+    const ext = o.external_order || o.externalOrder || {};
+    rows += `
+      <tr>
+        <td><span style="background:#f8d7da;color:#721c24;padding:3px 10px;border-radius:10px;font-size:11px;font-weight:600;">Missing</span></td>
+        <td>${escHtml(ext.order_code)}</td>
+        <td>${formatDateToMMDDYYYY(ext.order_date)}</td>
+        <td><span style="color:#b3141d;">Connex: ${liteQty(ext.ordered_qty)}</span><br/><span style="color:#999;">Truckast: Not found</span></td>
+        <td><span style="color:#b3141d;">Connex: ${escHtml(ext.status) || "—"}</span><br/><span style="color:#999;">Truckast: Not found</span></td>
+      </tr>`;
+  }
+
+  const tableOrNote = `
+        <div style="font-size:16px;font-weight:600;color:#2c3e50;margin:24px 0 10px;">Orders needing attention (${problemCount})</div>
+        <table width="100%" style="border-collapse:collapse;font-size:13px;border:1px solid #e0e0e0;border-radius:8px;overflow:hidden;">
+          <thead>
+            <tr style="background:#f8f9fa;color:#495057;text-align:left;">
+              <th style="padding:10px;">Status</th>
+              <th style="padding:10px;">Order Code</th>
+              <th style="padding:10px;">Date</th>
+              <th style="padding:10px;">Ordered Qty</th>
+              <th style="padding:10px;">Order Status</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+        <div style="font-size:11px;color:#888;margin-top:8px;">Connex = scraped board value · Truckast = system (DB) value · Command Cloud = live source status (status re-validated against the Command Cloud API).</div>`;
+
+  return `
+  <!DOCTYPE html>
+  <html><head><meta charset="UTF-8"/></head>
+  <body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;background:#f5f5f5;padding:20px;color:#333;">
+    <div style="max-width:900px;margin:0 auto;background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 2px 4px rgba(0,0,0,.1);">
+      <div style="background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;padding:20px;text-align:center;">
+        <h1 style="margin:0;font-size:22px;">Orders Comparison (Connex)</h1>
+      </div>
+      <div style="padding:24px;">
+        ${tenantLine}
+        ${providerLine}
+        ${dateLine}
+        ${summaryCards}
+        ${tableOrNote}
+        ${perTabLine ? `<div style="font-size:12px;color:#7f8c8d;margin-top:12px;">${perTabLine}</div>` : ""}
+        <div style="margin-top:28px;padding-top:16px;border-top:1px solid #e0e0e0;font-size:12px;color:#7f8c8d;text-align:center;">
+          Automated report — Connex orders compared on ordered quantity + status.
+        </div>
+      </div>
+    </div>
+  </body></html>`;
+}
+
+/**
+ * Send the slim lite-comparison email. Self-contained nodemailer send so the
+ * main sendComparisonEmail is never touched.
+ */
+async function sendLiteComparisonEmail(summary, fullResult, opts = {}) {
+  const smtpHost = process.env.SMTP_HOST;
+  const smtpPort = process.env.SMTP_PORT;
+  const parsedPort = smtpPort ? parseInt(smtpPort, 10) : 587;
+  const smtpUser = process.env.SMTP_USER;
+  const smtpPassword = process.env.SMTP_PASSWORD;
+  const smtpFrom = process.env.SMTP_FROM_EMAIL;
+  const smtpSecure =
+    process.env.SMTP_SECURE === "true" || process.env.SMTP_SECURE === "1";
+  const smtpTo = process.env.SMTP_TO;
+  const smtpCc = process.env.SMTP_CC || process.env.MAIL_CC || process.env.EMAIL_CC;
+
+  if (!smtpHost || !smtpUser || !smtpPassword) {
+    throw new Error("SMTP not configured: SMTP_HOST, SMTP_USER, and SMTP_PASSWORD are required");
+  }
+
+  const parseEmails = (s) =>
+    !s
+      ? []
+      : s.split(",").map((e) => e.trim()).filter((e) => e.includes("@") && e.length > 0);
+
+  let recipients = parseEmails(smtpTo);
+  if (recipients.length === 0 && smtpFrom && smtpFrom.includes("@") && smtpFrom !== "noreply@example.com") {
+    recipients = [smtpFrom.trim()];
+  }
+  if (recipients.length === 0 && smtpUser && smtpUser.includes("@")) {
+    recipients = [smtpUser.trim()];
+  }
+  if (recipients.length === 0) {
+    throw new Error("No email recipients: set SMTP_TO, SMTP_FROM_EMAIL, or SMTP_USER to a valid address");
+  }
+  const ccRecipients = parseEmails(smtpCc);
+
+  const tenant = process.env.PRODUCER_NAME || process.env.TENANT_NAME || "Truckast";
+  const businessTimezone = process.env.BUSINESS_TIMEZONE || "America/Chicago";
+  const now = new Date();
+  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const tzDate = new Date(now.toLocaleString("en-US", { timeZone: businessTimezone }));
+  const formattedDate = `${months[tzDate.getMonth()]} ${String(tzDate.getDate()).padStart(2, "0")}, ${tzDate.getFullYear()}`;
+  const timeStr = now.toLocaleString("en-US", {
+    timeZone: businessTimezone,
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true
+  });
+  const tzAbbr = now
+    .toLocaleString("en-US", { timeZone: businessTimezone, timeZoneName: "short" })
+    .split(" ")
+    .pop();
+
+  const subject = `${tenant} - Connex - Orders Comparison - ${formattedDate} ${timeStr} ${tzAbbr}`;
+  const html = formatLiteEmailBody(summary, fullResult, {
+    dateStr: `${formattedDate} · ${timeStr} ${tzAbbr}`,
+    perTab: opts.perTab
+  });
+
+  const transporter = nodemailer.createTransport({
+    host: smtpHost,
+    port: parsedPort,
+    secure: smtpSecure,
+    auth: { user: smtpUser, pass: smtpPassword },
+    tls: { rejectUnauthorized: false },
+    connectionTimeout: 30000,
+    greetingTimeout: 30000,
+    socketTimeout: 60000
+  });
+
+  await transporter.verify();
+
+  const mailOptions = {
+    from: smtpFrom || smtpUser,
+    to: recipients.join(", "),
+    subject,
+    html
+  };
+  if (ccRecipients.length > 0) mailOptions.cc = ccRecipients.join(", ");
+
+  await transporter.sendMail(mailOptions);
+  return true;
+}
+
 module.exports = {
   sendComparisonEmail,
-  shouldHideRevalidatedOrderForFreshMatch
+  shouldHideRevalidatedOrderForFreshMatch,
+  sendLiteComparisonEmail,
+  formatLiteEmailBody
 };
 
 
