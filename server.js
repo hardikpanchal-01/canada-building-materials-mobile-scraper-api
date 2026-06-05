@@ -1,3 +1,15 @@
+// Polyfill global WebSocket for Node < 22 (required by @supabase/realtime-js,
+// which throws at client construction when no WebSocket constructor exists).
+// No-op on Node 22+ where WebSocket is built in. Must run before any require
+// that creates a Supabase client.
+if (typeof globalThis.WebSocket === 'undefined') {
+  try {
+    globalThis.WebSocket = require('ws');
+  } catch (e) {
+    console.warn('⚠️  ws package not available for WebSocket polyfill:', e.message);
+  }
+}
+
 const app = require('./app');
 const { getSupabase } = require('./src/config/database');
 const { testConnection, closePool } = require('./src/services/database/postgresClient');
