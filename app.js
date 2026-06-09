@@ -189,6 +189,7 @@ app.use('/api/announcements', require('./src/routes/announcementRoutes'));
 app.use('/api/order-requests', require('./src/routes/orderRequestRoutes'));
 app.use('/api/email-templates', require('./src/routes/emailTemplateRoutes'));
 app.use('/api/ai', require('./src/routes/nlqRoutes'));
+app.use('/api/ai', require('./src/routes/aiAssistantRoutes'));
 app.use('/api/chat', require('./src/routes/chatRoutes'));
 app.use('/api/qr', require('./src/routes/qrRoutes'));
 

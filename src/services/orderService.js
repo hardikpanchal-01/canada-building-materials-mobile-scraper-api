@@ -429,6 +429,46 @@ function formatDate(date) {
 }
 
 /**
+ * Convert a calendar date (YYYY-MM-DD) to the UTC instant of that day's midnight
+ * in the given IANA timezone, returned as an ISO timestamp string. DST-safe via
+ * a two-pass offset resolution.
+ *
+ * Used to build tenant-timezone-aware order_date filter bounds. order_date is a
+ * `timestamp with time zone`; filtering on tenant-local midnight (rather than
+ * plain date strings, which Postgres evaluates in the UTC session) keeps the
+ * mobile day boundary identical to the web frontend.
+ *
+ * @param {string} dateStr - Calendar date 'YYYY-MM-DD'
+ * @param {string} timeZone - IANA timezone (e.g. 'America/New_York')
+ * @returns {string} ISO UTC timestamp of local midnight (e.g. '2026-06-09T04:00:00.000Z')
+ */
+function zonedMidnightToUTCISO(dateStr, timeZone) {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const baseUTC = Date.UTC(y, m - 1, d, 0, 0, 0);
+
+  // Offset (local - utc, in ms) that `timeZone` has at a given UTC instant.
+  const offsetMsAt = (utcMs) => {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone,
+      hour12: false,
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit'
+    }).formatToParts(new Date(utcMs));
+    const p = {};
+    for (const part of parts) p[part.type] = part.value;
+    const hour = p.hour === '24' ? 0 : Number(p.hour);
+    const localAsUTC = Date.UTC(Number(p.year), Number(p.month) - 1, Number(p.day), hour, Number(p.minute), Number(p.second));
+    return localAsUTC - utcMs;
+  };
+
+  // Two-pass: estimate with the offset at UTC-midnight, then refine so DST
+  // transitions resolve to the correct local-midnight instant.
+  let utc = baseUTC - offsetMsAt(baseUTC);
+  utc = baseUTC - offsetMsAt(utc);
+  return new Date(utc).toISOString();
+}
+
+/**
  * Format date to YYYY-MM-DD using UTC extraction (for DATE-type columns)
  *
  * PostgreSQL DATE columns store plain calendar dates. The pg driver maps them
@@ -693,14 +733,20 @@ async function getOrders(params = {}, userAccess = null) {
     tab
   } = params;
 
-  const tz = userAccess?.timezone || null;
+  const userTz = userAccess?.timezone || null;
+  // The orders "day" follows the tenant's business timezone (BUSINESS_TIMEZONE),
+  // matching the web frontend — not the DB session TZ or the user's personal tz.
+  const tzIana = process.env.BUSINESS_TIMEZONE || userTz?.iana || 'America/New_York';
+  // Display formatting uses the user's personal timezone when set, otherwise the
+  // tenant business timezone — never an unrelated default (previously Central).
+  const tz = userTz || { iana: tzIana };
 
-  // Determine date range
+  // Determine date range (computed in the tenant timezone so "today" is correct)
   let dateRange;
   if (start_date && end_date) {
     dateRange = { startDate: start_date, endDate: end_date };
   } else {
-    dateRange = getDateRange(date_filter, tz);
+    dateRange = getDateRange(date_filter, { iana: tzIana });
   }
 
   // Fetch exclusion patterns and progress bar colors in parallel.
@@ -717,12 +763,20 @@ async function getOrders(params = {}, userAccess = null) {
   endDateObj.setDate(endDateObj.getDate() + 1);
   const endDateExclusive = formatDate(endDateObj);
 
+  // order_date is `timestamp with time zone`. Comparing it against plain date
+  // strings would be evaluated in the DB session TZ (UTC) and mis-bucket
+  // late-evening local orders into the wrong day. Convert the window to the
+  // tenant timezone's local midnight (as UTC timestamptz) so the day boundary
+  // matches the web frontend exactly (half-open [start, end)).
+  const startBound = zonedMidnightToUTCISO(dateRange.startDate, tzIana);
+  const endBound = zonedMidnightToUTCISO(endDateExclusive, tzIana);
+
   // Build query with all required filters
   let whereConditions = [
     'o.order_date >= $1',
     'o.order_date < $2'
   ];
-  let queryParams = [dateRange.startDate, endDateExclusive];
+  let queryParams = [startBound, endBound];
   let paramIndex = 3;
 
   // Add exclusion pattern filters.
@@ -1009,19 +1063,20 @@ async function getOrders(params = {}, userAccess = null) {
   // pagination via LIMIT/OFFSET, counts via window functions
   const sql = `
     WITH order_totals AS (
-      -- Order eligibility: order has at least one CY-unit mix product.
-      -- Matches web frontend INNER JOIN on (CY AND is_mix=true) so mobile
-      -- counts mirror the web getAllSummaryData / market summary card.
+      -- Order eligibility: every order with >=1 order_product, regardless of unit.
+      -- Mirrors the web get_orders_paginated after migration 20260603000001
+      -- ("show all units") so the mobile list matches the web Orders table.
+      -- Concrete volume columns still sum only IN ('YDQ','CY') AND is_mix rows,
+      -- so non-concrete orders show 0 CY instead of being dropped.
       SELECT
         op.order_id,
-        SUM(COALESCE(op.order_qty, 0)) as ordered_qty,
-        SUM(COALESCE(op.delv_qty, 0)) as delivered_qty,
+        SUM(CASE WHEN op.order_qty_unit IN ('YDQ', 'CY') AND op.is_mix = true THEN COALESCE(op.order_qty, 0) ELSE 0 END) as ordered_qty,
+        SUM(CASE WHEN op.order_qty_unit IN ('YDQ', 'CY') AND op.is_mix = true THEN COALESCE(op.delv_qty, 0) ELSE 0 END) as delivered_qty,
         STRING_AGG(DISTINCT op.item_code, ', ') as product_codes,
         STRING_AGG(DISTINCT op.description, ', ') FILTER (WHERE op.description IS NOT NULL AND op.description != '') as product_description
       FROM order_products op
       INNER JOIN orders o_ot ON o_ot.order_id = op.order_id
-      WHERE op.order_qty_unit = 'YDQ' AND op.is_mix = true
-        AND o_ot.order_date >= $1 AND o_ot.order_date < $2
+      WHERE o_ot.order_date >= $1 AND o_ot.order_date < $2
       GROUP BY op.order_id
     ),
     order_schedules AS (
@@ -2818,15 +2873,24 @@ async function getOrderByCodeAndDate(orderCode, orderDate, tz = null, loadsPagin
  */
 async function getOrdersSummary(params = {}, userAccess = null) {
   const { date_filter = 'today', start_date, end_date, company_name, region_name, plant_code, plant_name } = params;
-  const tz = userAccess?.timezone || null;
+  const userTz = userAccess?.timezone || null;
+  // The summary "day" follows the tenant business timezone (matches the web).
+  const tzIana = process.env.BUSINESS_TIMEZONE || userTz?.iana || 'America/New_York';
 
-  // Determine date range
+  // Determine date range (computed in the tenant timezone so "today" is correct)
   let dateRange;
   if (start_date && end_date) {
     dateRange = { startDate: start_date, endDate: end_date };
   } else {
-    dateRange = getDateRange(date_filter, tz);
+    dateRange = getDateRange(date_filter, { iana: tzIana });
   }
+
+  // Tenant-timezone-aware half-open [start, end) bounds for the timestamptz
+  // order_date column, so the day boundary matches the web frontend.
+  const startBound = zonedMidnightToUTCISO(dateRange.startDate, tzIana);
+  const endObj = new Date(dateRange.endDate + 'T00:00:00');
+  endObj.setDate(endObj.getDate() + 1);
+  const endBound = zonedMidnightToUTCISO(formatDate(endObj), tzIana);
 
   // Fetch exclusion patterns for filtering (affects_counts subset — matches
   // web frontend getAllSummaryData so summary counts align).
@@ -2834,7 +2898,7 @@ async function getOrdersSummary(params = {}, userAccess = null) {
 
   // Build WHERE conditions
   let extraConditions = '';
-  let queryParams = [dateRange.startDate, dateRange.endDate];
+  let queryParams = [startBound, endBound];
   let paramIndex = 3;
 
   // Add exclusion pattern filters.
@@ -2965,8 +3029,8 @@ async function getOrdersSummary(params = {}, userAccess = null) {
       FROM orders o
       INNER JOIN order_products op ON op.order_id = o.order_id
         AND op.order_qty_unit = 'YDQ' AND op.is_mix = true
-      WHERE o.order_date >= $1::date
-        AND o.order_date < ($2::date + INTERVAL '1 day')
+      WHERE o.order_date >= $1::timestamptz
+        AND o.order_date < $2::timestamptz
         ${extraConditions}
       GROUP BY o.order_id, o.removed, o.remove_reason_code, o.current_status
     ),
@@ -2985,7 +3049,7 @@ async function getOrdersSummary(params = {}, userAccess = null) {
       FROM tickets t
       INNER JOIN orders o_ltc ON o_ltc.order_id = t.order_id
       WHERE (t.remove_reason_code IS NULL OR TRIM(t.remove_reason_code) = '')
-        AND o_ltc.order_date >= $1::date AND o_ltc.order_date < ($2::date + INTERVAL '1 day')
+        AND o_ltc.order_date >= $1::timestamptz AND o_ltc.order_date < $2::timestamptz
       ORDER BY t.order_id, t.created_date DESC NULLS LAST
     ),
     order_statuses AS (
@@ -3089,14 +3153,25 @@ async function getOrdersSummary(params = {}, userAccess = null) {
  */
 async function getActiveTrackingOrders(params = {}, userAccess = null) {
   const { date_filter = 'today', start_date, end_date, company_name, region_name, plant_code, plant_name } = params;
-  const tz = userAccess?.timezone || null;
+  const userTz = userAccess?.timezone || null;
+  // The tracking "day" follows the tenant business timezone (matches the web).
+  const tzIana = process.env.BUSINESS_TIMEZONE || userTz?.iana || 'America/New_York';
+  // Display formatting uses the user's personal tz when set, otherwise tenant tz.
+  const tz = userTz || { iana: tzIana };
 
   let dateRange;
   if (start_date && end_date) {
     dateRange = { startDate: start_date, endDate: end_date };
   } else {
-    dateRange = getDateRange(date_filter, tz);
+    dateRange = getDateRange(date_filter, { iana: tzIana });
   }
+
+  // Tenant-timezone-aware half-open [start, end) bounds for the timestamptz
+  // order_date column, so the day boundary matches the web frontend.
+  const startBound = zonedMidnightToUTCISO(dateRange.startDate, tzIana);
+  const endObj = new Date(dateRange.endDate + 'T00:00:00');
+  endObj.setDate(endObj.getDate() + 1);
+  const endBound = zonedMidnightToUTCISO(formatDate(endObj), tzIana);
 
   // affects_counts=true subset — matches web frontend getAllSummaryData
   const exclusionPatterns = await fetchExclusionPatterns({ affectsCountsOnly: true });
@@ -3105,11 +3180,11 @@ async function getActiveTrackingOrders(params = {}, userAccess = null) {
   // status != 2 (Weather Permitting) is kept here because this endpoint
   // powers active-tracking views that exclude weather-held orders by design.
   let whereConditions = [
-    'o.order_date >= $1::date',
-    'o.order_date < ($2::date + INTERVAL \'1 day\')',
+    'o.order_date >= $1::timestamptz',
+    'o.order_date < $2::timestamptz',
     'COALESCE(o.current_status, 0) != 2'
   ];
-  let queryParams = [dateRange.startDate, dateRange.endDate];
+  let queryParams = [startBound, endBound];
   let paramIndex = 3;
 
   // Add exclusion pattern filters — matches web frontend filterExcludedOrders.
@@ -3243,7 +3318,7 @@ async function getActiveTrackingOrders(params = {}, userAccess = null) {
       FROM order_products op
       INNER JOIN orders o_ot ON o_ot.order_id = op.order_id
       WHERE op.order_qty_unit = 'YDQ'
-        AND o_ot.order_date >= $1::date AND o_ot.order_date < ($2::date + INTERVAL '1 day')
+        AND o_ot.order_date >= $1::timestamptz AND o_ot.order_date < $2::timestamptz
       GROUP BY op.order_id
     ),
     order_schedules AS (
@@ -3274,7 +3349,7 @@ async function getActiveTrackingOrders(params = {}, userAccess = null) {
           AND COALESCE(t.end_unload, t.wash_time) IS NOT NULL
       ) sub ON true
       WHERE (op.order_qty_unit = 'YDQ' AND op.is_mix = true)
-        AND o_os.order_date >= $1::date AND o_os.order_date < ($2::date + INTERVAL '1 day')
+        AND o_os.order_date >= $1::timestamptz AND o_os.order_date < $2::timestamptz
       GROUP BY op.order_id
     ),
     last_ticket_completion AS (
@@ -3292,7 +3367,7 @@ async function getActiveTrackingOrders(params = {}, userAccess = null) {
       FROM tickets t
       INNER JOIN orders o_ltc ON o_ltc.order_id = t.order_id
       WHERE (t.remove_reason_code IS NULL OR TRIM(t.remove_reason_code) = '')
-        AND o_ltc.order_date >= $1::date AND o_ltc.order_date < ($2::date + INTERVAL '1 day')
+        AND o_ltc.order_date >= $1::timestamptz AND o_ltc.order_date < $2::timestamptz
       ORDER BY t.order_id, t.created_date DESC NULLS LAST
     ),
     in_progress_orders AS (
