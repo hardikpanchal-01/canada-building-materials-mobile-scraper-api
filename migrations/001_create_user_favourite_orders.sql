@@ -2,10 +2,12 @@
 -- Description: Stores user favourite orders for quick access
 -- Date: 2026-02-05
 
+-- NOTE: order_id is VARCHAR to match public.orders.order_id (a varchar UUID in
+-- this tenant's DB). Do not use BIGINT — that was the Stevenson Weir schema.
 CREATE TABLE IF NOT EXISTS user_favourite_orders (
     id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
     user_id UUID NOT NULL,
-    order_id BIGINT NOT NULL,
+    order_id VARCHAR NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 

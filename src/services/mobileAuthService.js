@@ -11,11 +11,10 @@
 const { getAuthSupabaseAdmin } = require('../config/authDatabase');
 const { getSupabaseAdmin } = require('../config/database');
 const { createAuthCode, consumeAuthCode, CODE_EXPIRY_SECONDS } = require('./authCodeService');
-const { verifyPassword, secureCompare } = require('../utils/encryptionUtils');
+const { verifyPassword, secureCompare, decryptTenantSecret } = require('../utils/encryptionUtils');
 const { generateAccessToken, generateRefreshToken } = require('../utils/jwtUtils');
 const deviceService = require('./deviceService');
 const { loadUserAccessData } = require('../middleware/auth');
-const { getClientSecretBySubdomain } = require('../config/tenantClients');
 
 /**
  * Error codes for mobile auth operations
@@ -58,6 +57,28 @@ const ERROR_MESSAGES = {
   TENANT_MISMATCH: 'Authorization code does not match tenant',
   SERVER_ERROR: 'An unexpected error occurred'
 };
+
+/**
+ * Resolve a tenant's client_secret from the database (single source of truth).
+ *
+ * `auth_tenant.tenants.client_secret` is stored AES-256-GCM encrypted. This is the
+ * exact value the central federated login (`/api/federated-auth/login`) hands back
+ * to the client (decrypted), so validating the incoming secret against it — rather
+ * than against a hardcoded copy — keeps login and exchange-code in lockstep even
+ * when a tenant's secret is rotated.
+ *
+ * @param {Object} tenant - Tenant row containing the encrypted `client_secret` column
+ * @returns {string|null} Decrypted client secret, or null if missing/undecryptable
+ */
+function resolveTenantClientSecret(tenant) {
+  if (!tenant || !tenant.client_secret) return null;
+  try {
+    return decryptTenantSecret(tenant.client_secret);
+  } catch (err) {
+    console.error('[MobileAuth] Failed to decrypt tenant client_secret:', err.message);
+    return null;
+  }
+}
 
 /**
  * Get user by email from auth_tenant.users
@@ -172,7 +193,7 @@ async function getUserTenantWithDetails(userId) {
   const { data: tData, error: tError } = await supabase
     .schema('auth_tenant')
     .from('tenants')
-    .select('id, uuid, name, subdomain, redirect_url, client_id, status, settings, backend_url, supabase_url, qr_enabled, qr_mode, qr_user_active, timezone')
+    .select('id, uuid, name, subdomain, redirect_url, client_id, client_secret, status, settings, backend_url, supabase_url, qr_enabled, qr_mode, qr_user_active, timezone')
     .eq('id', tenantUser.tenant_id)
     .is('deleted_at', null)
     .limit(1);
@@ -376,7 +397,7 @@ async function authenticateAndGenerateCode({ email, password, metadata = {} }) {
     ]).catch(() => {});
 
     // Step 9: Return success with code, redirect URL, and client_secret for exchange
-    const clientSecret = getClientSecretBySubdomain(tenant.subdomain);
+    const clientSecret = resolveTenantClientSecret(tenant);
 
     return {
       success: true,
@@ -466,8 +487,10 @@ async function exchangeCodeForUserInfo({ code, client_secret, device_info }) {
       };
     }
 
-    // Step 3: Validate client_secret against tenant config
-    const expectedSecret = getClientSecretBySubdomain(tenant.subdomain);
+    // Step 3: Validate client_secret against the tenant's own secret stored in the DB.
+    // This is the same (decrypted) value the federated login hands to the client, so
+    // rotating a tenant's secret never desyncs login from exchange-code.
+    const expectedSecret = resolveTenantClientSecret(tenant);
 
     if (!expectedSecret) {
       return {
@@ -774,7 +797,7 @@ async function generateSwitchCode({ userId, email, targetSubdomain }) {
     const { data: tData, error: tError } = await supabase
       .schema('auth_tenant')
       .from('tenants')
-      .select('id, uuid, name, subdomain, redirect_url, client_id, status, backend_url, supabase_url, supabase_anon_key, supabase_service_key, qr_enabled, qr_mode, qr_user_active')
+      .select('id, uuid, name, subdomain, redirect_url, client_id, client_secret, status, backend_url, supabase_url, supabase_anon_key, supabase_service_key, qr_enabled, qr_mode, qr_user_active')
       .eq('subdomain', targetSubdomain.toLowerCase().trim())
       .is('deleted_at', null)
       .limit(1);
@@ -804,7 +827,7 @@ async function generateSwitchCode({ userId, email, targetSubdomain }) {
     });
 
     // Step 4: Get client secret for the target tenant
-    const clientSecret = getClientSecretBySubdomain(tenant.subdomain);
+    const clientSecret = resolveTenantClientSecret(tenant);
 
     return {
       success: true,

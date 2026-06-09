@@ -195,6 +195,32 @@ async function getCombinedSummary(dateFrom, dateTo, exclusionPatterns, userAcces
     }
   }
 
+  // The `companies` table is empty for this tenant and every plant carries
+  // company_code '0', so the company JOIN above yields nothing. Mirror the web,
+  // which presents a single tenant-level "company" aggregate. Synthesize it from
+  // the per-plant rows: each order maps to exactly one plant via
+  // pricing_plant_code, so summing plant counts gives distinct-order totals.
+  if (companies.length === 0 && plants.length > 0) {
+    const agg = plants.reduce((a, p) => ({
+      totalOrders: a.totalOrders + p.totalOrders,
+      activeOrders: a.activeOrders + p.activeOrders,
+      cancelledOrders: a.cancelledOrders + p.cancelledOrders,
+      totalCY: a.totalCY + p.totalCY,
+      usedCY: a.usedCY + p.usedCY
+    }), { totalOrders: 0, activeOrders: 0, cancelledOrders: 0, totalCY: 0, usedCY: 0 });
+
+    companies.push({
+      id: '0',
+      code: '0',
+      name: process.env.PRODUCER_NAME || process.env.TENANT_NAME || 'Company',
+      totalOrders: agg.totalOrders,
+      activeOrders: agg.activeOrders,
+      cancelledOrders: agg.cancelledOrders,
+      totalCY: parseFloat(agg.totalCY.toFixed(2)),
+      usedCY: parseFloat(agg.usedCY.toFixed(2))
+    });
+  }
+
   // Sort each group to match original ordering
   companies.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
   regions.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
