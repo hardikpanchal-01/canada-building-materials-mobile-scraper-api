@@ -462,7 +462,7 @@ async function getOrders(req, res) {
     // Add is_favourite flag to each order
     result.orders = result.orders.map(order => ({
       ...order,
-      is_favourite: favouriteIds.has(Number(order.order_id))
+      is_favourite: favouriteIds.has(order.order_id)
     }));
 
     // Hide region_name from filters if tenant has show_regions disabled
@@ -860,7 +860,7 @@ async function getOrderById(req, res) {
     }
 
     // Add is_favourite flag to order
-    order.is_favourite = favouriteIds.has(Number(order.order_id));
+    order.is_favourite = favouriteIds.has(order.order_id);
 
     return res.status(200).json({
       success: true,
