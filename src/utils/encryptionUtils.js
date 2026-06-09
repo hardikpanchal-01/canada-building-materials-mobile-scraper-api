@@ -98,6 +98,56 @@ function decrypt(encryptedData) {
 }
 
 /**
+ * Decrypt a tenant secret that was encrypted by the admin app (admin-truckast-ai).
+ *
+ * The admin app is the single writer of encrypted tenant fields (client_secret,
+ * supabase keys) in the shared `auth_tenant` DB. Its scheme differs from this
+ * service's local `encrypt`/`decrypt`:
+ *   - key = sha256(ENCRYPTION_SECRET_KEY)   (passphrase hashed, NOT a raw hex key)
+ *   - 16-byte IV, default 16-byte GCM auth tag
+ *   - format: iv:authTag:ciphertext (all hex)
+ *
+ * The shared passphrase is the same value this service holds in ENCRYPTION_KEY, so
+ * we derive the key by hashing that string — matching the admin app exactly. Use
+ * this (not `decrypt`) for any value read from the admin-managed tenant tables.
+ *
+ * @param {string} encryptedData - Admin-encrypted string (iv:authTag:ciphertext)
+ * @returns {string} Decrypted plaintext (returned as-is if not in encrypted format)
+ * @throws {Error} If the key is missing or the data fails authentication
+ */
+function decryptTenantSecret(encryptedData) {
+  if (!encryptedData) {
+    return null;
+  }
+
+  const parts = encryptedData.split(':');
+
+  // Admin app stores some values in plaintext; if it isn't iv:authTag:ciphertext,
+  // treat it as already-plaintext (mirrors the admin app's own decrypt fallback).
+  if (parts.length !== 3) {
+    return encryptedData;
+  }
+
+  const secret = process.env.ENCRYPTION_KEY;
+  if (!secret) {
+    throw new Error('ENCRYPTION_KEY not configured in environment variables');
+  }
+
+  const [ivHex, authTagHex, ciphertext] = parts;
+  const key = crypto.createHash('sha256').update(secret).digest();
+  const iv = Buffer.from(ivHex, 'hex');
+  const authTag = Buffer.from(authTagHex, 'hex');
+
+  const decipher = crypto.createDecipheriv(ALGORITHM, key, iv);
+  decipher.setAuthTag(authTag);
+
+  let decrypted = decipher.update(ciphertext, 'hex', 'utf8');
+  decrypted += decipher.final('utf8');
+
+  return decrypted;
+}
+
+/**
  * Generate a secure random authorization code
  * @returns {string} 64-character hex string (32 bytes)
  */
@@ -154,6 +204,7 @@ function secureCompare(a, b) {
 module.exports = {
   encrypt,
   decrypt,
+  decryptTenantSecret,
   generateAuthCode,
   hashPassword,
   verifyPassword,
