@@ -1,0 +1,57 @@
+{
+  "name": "canada-building-materials-unified-api",
+  "version": "2.0.0",
+  "description": "Unified Truckast API - Mobile Backend & Scraper API (Canada Building Materials)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "start:worker": "node server.js --worker",
+    "worker": "node src/workers/processQueueWorker.js",
+    "dev": "nodemon server.js",
+    "dev:worker": "nodemon server.js --worker",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "api",
+    "express",
+    "truckast",
+    "mobile-backend",
+    "scraper",
+    "supabase"
+  ],
+  "author": "",
+  "license": "ISC",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "^3.0.81",
+    "@ai-sdk/azure": "^3.0.70",
+    "@ai-sdk/google": "^3.0.80",
+    "@anthropic-ai/sdk": "^0.90.0",
+    "@supabase/supabase-js": "^2.89.0",
+    "ai": "^6.0.198",
+    "axios": "^1.13.5",
+    "bcryptjs": "^3.0.3",
+    "compression": "^1.8.1",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.3",
+    "express": "^5.2.1",
+    "fast-xml-parser": "^5.3.6",
+    "firebase": "^12.7.0",
+    "firebase-admin": "^13.6.0",
+    "jsonwebtoken": "^9.0.3",
+    "multer": "^2.0.2",
+    "node-forge": "^1.3.3",
+    "nodemailer": "^6.10.1",
+    "pg": "^8.16.3",
+    "swagger-jsdoc": "^6.2.8",
+    "swagger-ui-express": "^5.0.0",
+    "twilio": "^6.0.2",
+    "ws": "^8.21.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.11"
+  }
+}
