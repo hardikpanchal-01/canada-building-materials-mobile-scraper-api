@@ -688,7 +688,10 @@ async function exchangeCodeForUserInfo({ code, client_secret, device_info }) {
             tenant_redirect_url: tenant.redirect_url,
             tenant_client_id: tenant.client_id,
             tenant_supabase_url: tenant.supabase_url || null,
-            tenant_backend_url: tenant.backend_url || null,
+            // Fall back to the per-tenant API host when backend_url is unset in the
+            // DB — matches the admin federated-login behavior so the mobile app
+            // never receives a null backend_url (which crashes normalizeBackendUrl).
+            tenant_backend_url: tenant.backend_url || `https://${tenant.subdomain}-api.truckast.ai`,
             qr_enabled: tenant.qr_enabled ?? false,
             qr_mode: tenant.qr_mode || 'encrypted',
             qr_user_active: tenant.qr_user_active ?? false
@@ -764,7 +767,7 @@ async function getUserTenants(userId) {
         uuid: t.uuid,
         name: t.name,
         subdomain: t.subdomain,
-        backend_url: t.backend_url || null,
+        backend_url: t.backend_url || `https://${t.subdomain}-api.truckast.ai`,
         image_url: t.image_url || null,
         supabase_config: {
           SUPABASE_URL: t.supabase_url || null,
@@ -838,7 +841,7 @@ async function generateSwitchCode({ userId, email, targetSubdomain }) {
         id: tenant.id,
         name: tenant.name,
         subdomain: tenant.subdomain,
-        backend_url: tenant.backend_url || null
+        backend_url: tenant.backend_url || `https://${tenant.subdomain}-api.truckast.ai`
       },
       supabase_config: {
         SUPABASE_URL: tenant.supabase_url || null,

@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { authenticate, invalidateTzPrefCache, resolveEffectiveUserId } = require('../middleware/auth');
+const { authenticate, invalidateTzPrefCache } = require('../middleware/auth');
 const { getSupabaseAdmin } = require('../config/database');
 
 /**
@@ -10,7 +10,11 @@ const { getSupabaseAdmin } = require('../config/database');
  */
 router.get('/:key', authenticate, async (req, res) => {
   try {
-    const userId = await resolveEffectiveUserId(req.user.id, req.user.email);
+    // Use req.user.id (the JWT's id) so the saved preference is keyed by the SAME
+    // id the auth middleware reads it back by (middleware/auth.js: .eq('user_id', decoded.id)).
+    // Using a resolved/email-mapped id here caused timezone changes to never reflect
+    // for multi-tenant users (saved under one id, read under another).
+    const userId = req.user.id;
     const { key } = req.params;
 
     const supabase = getSupabaseAdmin();
@@ -43,7 +47,11 @@ router.get('/:key', authenticate, async (req, res) => {
  */
 router.put('/:key', authenticate, async (req, res) => {
   try {
-    const userId = await resolveEffectiveUserId(req.user.id, req.user.email);
+    // Use req.user.id (the JWT's id) so the saved preference is keyed by the SAME
+    // id the auth middleware reads it back by (middleware/auth.js: .eq('user_id', decoded.id)).
+    // Using a resolved/email-mapped id here caused timezone changes to never reflect
+    // for multi-tenant users (saved under one id, read under another).
+    const userId = req.user.id;
     const { key } = req.params;
     const { value } = req.body;
 
