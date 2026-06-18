@@ -72,3 +72,6 @@ temp/
 *.pid.lock
 
 /docs
+# Firebase service-account key (secret — never commit)
+src/config/*firebase-adminsdk*.json
+*-adminsdk-*.json
