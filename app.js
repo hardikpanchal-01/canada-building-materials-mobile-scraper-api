@@ -89,6 +89,16 @@ const dynamicSwaggerDoc = (baseSpec) => (req, res, next) => {
   next();
 };
 
+// Never let a CDN/browser cache the Swagger UI assets (esp. swagger-ui-init.js),
+// otherwise a stale spec with the wrong server URL (http vs https) gets pinned at
+// the edge for hours. no-store keeps the dynamic https server URL always fresh.
+app.use(['/scraper-api-docs', '/mobile-api-docs', '/scraper-api-docs.json', '/mobile-api-docs.json'], (req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  next();
+});
+
 // Create separate routers for each swagger docs to avoid serve middleware conflicts
 const scraperDocsRouter = express.Router();
 scraperDocsRouter.use('/',
