@@ -1,72 +1,67 @@
 /**
- * Auth Supabase Database Configuration
+ * Central auth database client.
  *
- * Separate Supabase instance for authentication operations.
- * Uses auth_tenant schema for tenants, users, auth_codes, etc.
+ * Reads `auth_tenant.users` in the SHARED central auth database — a different
+ * database from this tenant's own, so it needs its own connection pool.
+ *
+ * This used to be a hosted-client-library instance pointed at a PostgREST
+ * gateway. It now connects directly, which needs CENTRAL_AUTH_DATABASE_URL to be
+ * set. The old AUTH_* gateway URL and keys are no longer used.
  */
 
-const { createClient } = require('@supabase/supabase-js');
+const pg = require('pg');
+const { Pool } = pg;
+const { QueryBuilder, RpcBuilder } = require('./queryBuilder.js');
 
-// Auth Supabase configuration (separate from main app database)
-const authSupabaseUrl = process.env.AUTH_SUPABASE_URL;
-const authSupabaseAnonKey = process.env.AUTH_SUPABASE_ANON_KEY;
-const authSupabaseServiceKey = process.env.AUTH_SUPABASE_SERVICE_KEY;
+const AUTH_SCHEMA = 'auth_tenant';
 
-let authSupabase = null; // Regular client (uses anon key, respects RLS)
-let authSupabaseAdmin = null; // Admin client (uses service key, bypasses RLS)
+let authPool = null;
 
-// Initialize regular Auth Supabase client
-if (authSupabaseUrl && authSupabaseAnonKey &&
-    authSupabaseUrl !== 'your_auth_supabase_url' &&
-    authSupabaseAnonKey !== 'your_auth_supabase_anon_key') {
-  authSupabase = createClient(authSupabaseUrl, authSupabaseAnonKey, {
-    db: {
-      schema: 'auth_tenant'
+function getAuthPool() {
+  if (!authPool) {
+    const connectionString = process.env.CENTRAL_AUTH_DATABASE_URL;
+    if (!connectionString) {
+      throw new Error(
+        'Central auth database is not configured. Please set CENTRAL_AUTH_DATABASE_URL in your .env file.'
+      );
     }
-  });
-} else {
-  console.warn('⚠️  Auth Supabase credentials not configured. Please update your .env file with AUTH_SUPABASE_URL and AUTH_SUPABASE_ANON_KEY.');
-}
-
-// Initialize admin Auth Supabase client (with service key for admin operations)
-if (authSupabaseUrl && authSupabaseServiceKey &&
-    authSupabaseUrl !== 'your_auth_supabase_url' &&
-    authSupabaseServiceKey !== 'your_auth_supabase_service_key') {
-  authSupabaseAdmin = createClient(authSupabaseUrl, authSupabaseServiceKey, {
-    auth: {
-      autoRefreshToken: false,
-      persistSession: false
-    },
-    db: {
-      schema: 'auth_tenant'
-    }
-  });
-} else if (authSupabase) {
-  // Fallback to anon key if service key not available (for development)
-  console.warn('⚠️  AUTH_SUPABASE_SERVICE_KEY not configured. Using anon key for admin operations (may fail with RLS).');
-  authSupabaseAdmin = authSupabase;
-}
-
-/**
- * Get Auth Supabase client (regular, respects RLS)
- * @returns {Object} Supabase client for auth_tenant schema
- * @throws {Error} If not configured
- */
-/**
- * Get Auth Supabase admin client (bypasses RLS)
- * @returns {Object} Supabase admin client for auth_tenant schema
- * @throws {Error} If not configured
- */
-function getAuthSupabaseAdmin() {
-  if (!authSupabaseAdmin) {
-    console.error('[AuthDB] Auth Supabase admin client is not configured!');
-    console.error('[AuthDB] AUTH_SUPABASE_URL:', process.env.AUTH_SUPABASE_URL ? 'SET' : 'NOT SET');
-    console.error('[AuthDB] AUTH_SUPABASE_SERVICE_KEY:', process.env.AUTH_SUPABASE_SERVICE_KEY ? 'SET' : 'NOT SET');
-    throw new Error('Auth Supabase admin client is not configured. Please set AUTH_SUPABASE_SERVICE_KEY in your .env file.');
+    authPool = new Pool({
+      connectionString,
+      ssl:
+        process.env.CENTRAL_AUTH_DATABASE_SSL === 'false'
+          ? false
+          : { rejectUnauthorized: false },
+      max: parseInt(process.env.CENTRAL_AUTH_PG_POOL_MAX, 10) || 5,
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 10000,
+    });
+    authPool.on('error', (err) => {
+      console.error('Central auth pool error:', err.message);
+    });
   }
-  return authSupabaseAdmin;
+  return authPool;
+}
+
+function makeAuthClient(schema) {
+  return {
+    from: (table) => new QueryBuilder(schema, table, getAuthPool),
+    rpc: (fn, args) => new RpcBuilder(schema, fn, args, getAuthPool),
+    schema: (s) => makeAuthClient(s),
+  };
+}
+
+let authClient = null;
+
+/**
+ * Admin client for the central auth database.
+ * Retained name for call-site compatibility.
+ */
+function getAuthDbAdmin() {
+  if (!authClient) authClient = makeAuthClient(AUTH_SCHEMA);
+  return authClient;
 }
 
 module.exports = {
-  getAuthSupabaseAdmin
+  getAuthDbAdmin,
+  getAuthPool,
 };

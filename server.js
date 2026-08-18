@@ -1,7 +1,7 @@
-// Polyfill global WebSocket for Node < 22 (required by @supabase/realtime-js,
+// Polyfill global WebSocket for Node < 22 (required by @db/realtime-js,
 // which throws at client construction when no WebSocket constructor exists).
 // No-op on Node 22+ where WebSocket is built in. Must run before any require
-// that creates a Supabase client.
+// that creates a the database client.
 if (typeof globalThis.WebSocket === 'undefined') {
   try {
     globalThis.WebSocket = require('ws');
@@ -11,7 +11,7 @@ if (typeof globalThis.WebSocket === 'undefined') {
 }
 
 const app = require('./app');
-const { getSupabase } = require('./src/config/database');
+const { getDb } = require('./src/config/database');
 const { testConnection, closePool } = require('./src/services/database/postgresClient');
 const { runWorkerLoop } = require('./src/services/queueProcessorService');
 const {
@@ -45,15 +45,15 @@ process.on('unhandledRejection', (reason, promise) => {
 
 // Test database connections
 async function testConnections() {
-  // Test Supabase connection
+  // Test the database connection
   try {
-    const supabase = getSupabase();
-    console.log('✓ Supabase client initialized successfully');
+    const db = getDb();
+    console.log('✓ Database client initialized successfully');
   } catch (err) {
     if (err.message.includes('not configured')) {
-      console.log('⚠️  Supabase not configured - server will start but database features will be unavailable');
+      console.log('⚠️  Database not configured - server will start but database features will be unavailable');
     } else {
-      console.log('⚠️  Supabase initialization failed:', err.message);
+      console.log('⚠️  Database initialization failed:', err.message);
     }
   }
 
@@ -115,7 +115,7 @@ const server = app.listen(PORT, async () => {
     console.log(`   Polling every ${WORKER_POLL_INTERVAL}ms`);
   }
 
-  // Start the chat realtime listener (Supabase realtime → FCM fan-out).
+  // Start the chat realtime listener (the database realtime → FCM fan-out).
   // Runs on every dyno; cheap (just websocket subscriptions).
   try {
     startChatRealtimeListener();

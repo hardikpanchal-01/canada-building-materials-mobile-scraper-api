@@ -1502,7 +1502,7 @@ async function revalidateMismatchedOrders(mismatchedOrders) {
  * Replicates the web app's getCompanySummaryData() logic exactly:
  *
  * Web app flow:
- * 1. Supabase query: orders with order_products!inner (INNER JOIN, any product)
+ * 1. the database query: orders with order_products!inner (INNER JOIN, any product)
  * 2. Post-filter: keep orders that have at least one CY product
  * 3. Exclusion: customer patterns filtered to CONCRETE-only, ALL product &
  *    delivery_address patterns kept. All use includes() (substring match).

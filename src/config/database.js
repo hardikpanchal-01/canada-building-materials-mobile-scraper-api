@@ -1,57 +1,47 @@
-const { createClient } = require('@supabase/supabase-js');
+/**
+ * Database clients for the tenant's own Postgres.
+ *
+ * These used to be hosted-client-library instances pointed at a PostgREST
+ * gateway. They now build SQL and run it on the direct connection pool
+ * (services/database/postgresClient), which removes the HTTP hop.
+ *
+ * The chainable surface is unchanged (`.from(t).select().eq()...`), so callers
+ * did not have to change.
+ *
+ * Note on the two accessors: the previous split was an anon-key client that
+ * respected row-level security and a service-key client that bypassed it. A
+ * direct pool connects as one database role, so both now return the same
+ * client. The role in DATABASE_URL decides what is visible — keep that role
+ * least-privileged rather than relying on the distinction here.
+ */
 
-// Supabase configuration
-const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseAnonKey = process.env.SUPABASE_ANON_KEY;
-const supabaseServiceKey = process.env.SUPABASE_SERVICE_KEY;
+const { QueryBuilder, RpcBuilder } = require('./queryBuilder.js');
+const { authAdmin } = require('./authAdmin.js');
 
-let supabase = null; // Regular client (uses anon key, respects RLS)
-let supabaseAdmin = null; // Admin client (uses service key, bypasses RLS)
-
-// Initialize regular Supabase client (with anon key)
-if (supabaseUrl && supabaseAnonKey && 
-    supabaseUrl !== 'your_supabase_project_url' && 
-    supabaseAnonKey !== 'your_supabase_anon_key') {
-  supabase = createClient(supabaseUrl, supabaseAnonKey);
-} else {
-  console.warn('⚠️  Supabase credentials not configured. Please update your .env file with your Supabase URL and API key.');
+function makeClient(schema) {
+  return {
+    from: (table) => new QueryBuilder(schema, table),
+    rpc: (fn, args) => new RpcBuilder(schema, fn, args),
+    schema: (s) => makeClient(s),
+    // `auth.admin.*` used to reach a hosted auth service; it now runs SQL
+    // against this tenant's own auth.users.
+    auth: { admin: authAdmin },
+  };
 }
 
-// Initialize admin Supabase client (with service key for admin operations)
-if (supabaseUrl && supabaseServiceKey && 
-    supabaseUrl !== 'your_supabase_project_url' && 
-    supabaseServiceKey !== 'your_supabase_service_key') {
-  supabaseAdmin = createClient(supabaseUrl, supabaseServiceKey, {
-    auth: {
-      autoRefreshToken: false,
-      persistSession: false
-    }
-  });
-} else if (supabaseUrl && supabaseAnonKey) {
-  // Fallback to anon key if service key not available (for development)
-  console.warn('⚠️  SUPABASE_SERVICE_KEY not configured. Using anon key for admin operations (may fail with RLS).');
-  supabaseAdmin = supabase;
+let client = null;
+
+function getDb() {
+  if (!client) client = makeClient('public');
+  return client;
 }
 
-// Export a function that ensures Supabase is initialized
-function getSupabase() {
-  if (!supabase) {
-    throw new Error('Supabase is not configured. Please set SUPABASE_URL and SUPABASE_ANON_KEY in your .env file.');
-  }
-  return supabase;
-}
-
-// Export admin client for operations that need to bypass RLS
-function getSupabaseAdmin() {
-  if (!supabaseAdmin) {
-    throw new Error('Supabase admin client is not configured. Please set SUPABASE_SERVICE_KEY in your .env file for admin operations.');
-  }
-  return supabaseAdmin;
+/** Retained name for call-site compatibility; see the note above. */
+function getDbAdmin() {
+  return getDb();
 }
 
 module.exports = {
-  getSupabase,
-  getSupabaseAdmin
+  getDb,
+  getDbAdmin,
 };
-
-

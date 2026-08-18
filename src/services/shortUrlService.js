@@ -7,7 +7,7 @@
  * - Increment click count
  */
 
-const { getAuthSupabaseAdmin } = require('../config/authDatabase');
+const { getAuthDbAdmin } = require('../config/authDatabase');
 
 /**
  * Resolve a short URL by its code
@@ -15,10 +15,10 @@ const { getAuthSupabaseAdmin } = require('../config/authDatabase');
  * @returns {Object} { success, data, error, error_code }
  */
 async function resolveShortUrl(code) {
-  const supabase = getAuthSupabaseAdmin();
+  const db = getAuthDbAdmin();
 
   // Look up the short URL record
-  const { data, error: fetchError } = await supabase
+  const { data, error: fetchError } = await db
     .schema('auth_tenant')
     .from('short_urls')
     .select('id, code, tenant_slug, original_url, expires_at, click_count')
@@ -47,13 +47,13 @@ async function resolveShortUrl(code) {
   }
 
   // Increment click_count atomically and update last_accessed_at (fire-and-forget)
-  supabase
+  db
     .rpc('increment_short_url_click', { short_url_id: record.id })
     .then(({ error: updateError }) => {
       if (updateError) {
         // Fallback to non-atomic update if RPC not available
         console.warn('[ShortUrl] RPC increment failed, using fallback:', updateError.message);
-        supabase
+        db
           .schema('auth_tenant')
           .from('short_urls')
           .update({

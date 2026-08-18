@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { getSupabaseAdmin } = require('../config/database');
+const { getDbAdmin } = require('../config/database');
 
 /**
  * Get the current timezone abbreviation (handles DST automatically).
@@ -86,8 +86,8 @@ function getCurrentDateTime(ianaCode, now) {
  */
 router.get('/', async (req, res) => {
   try {
-    const supabase = getSupabaseAdmin();
-    const { data, error } = await supabase
+    const db = getDbAdmin();
+    const { data, error } = await db
       .from('timezones')
       .select('id, iana_code, display_name, abbreviation, utc_offset, dst_offset')
       .eq('is_active', true)

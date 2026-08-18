@@ -258,7 +258,7 @@ async function markFailed(batchId, error, currentRetryCount) {
 }
 
 /**
- * Fetch orders from Supabase Storage
+ * Fetch orders from object storage
  *
  * @param {string} fileUrl - URL to the stored orders JSON file
  * @returns {Promise<array>} Array of orders

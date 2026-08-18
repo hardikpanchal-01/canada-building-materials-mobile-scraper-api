@@ -1,4 +1,4 @@
-const { getSupabaseAdmin } = require('../config/database');
+const { getDbAdmin } = require('../config/database');
 
 // =============================================================================
 // Static default template definitions
@@ -50,8 +50,8 @@ const DEFAULT_TEMPLATES = [
 
 // Fetch all email templates ordered by template_key
 async function getEmailTemplates() {
-  const supabase = getSupabaseAdmin();
-  const { data, error } = await supabase
+  const db = getDbAdmin();
+  const { data, error } = await db
     .from('email_templates')
     .select('*')
     .order('template_key', { ascending: true });
@@ -62,8 +62,8 @@ async function getEmailTemplates() {
 
 // Fetch a single email template by id
 async function getEmailTemplateById(id) {
-  const supabase = getSupabaseAdmin();
-  const { data, error } = await supabase
+  const db = getDbAdmin();
+  const { data, error } = await db
     .from('email_templates')
     .select('*')
     .eq('id', id)
@@ -75,8 +75,8 @@ async function getEmailTemplateById(id) {
 
 // Fetch an active email template by template_key
 async function getEmailTemplateByKey(templateKey) {
-  const supabase = getSupabaseAdmin();
-  const { data, error } = await supabase
+  const db = getDbAdmin();
+  const { data, error } = await db
     .from('email_templates')
     .select('*')
     .eq('template_key', templateKey)
@@ -89,8 +89,8 @@ async function getEmailTemplateByKey(templateKey) {
 
 // Create a new email template
 async function createEmailTemplate(input) {
-  const supabase = getSupabaseAdmin();
-  const { data, error } = await supabase
+  const db = getDbAdmin();
+  const { data, error } = await db
     .from('email_templates')
     .insert({
       template_key: input.template_key,
@@ -112,7 +112,7 @@ async function createEmailTemplate(input) {
 
 // Update an existing email template
 async function updateEmailTemplate(id, input) {
-  const supabase = getSupabaseAdmin();
+  const db = getDbAdmin();
 
   const updatePayload = { updated_at: new Date().toISOString() };
 
@@ -126,7 +126,7 @@ async function updateEmailTemplate(id, input) {
   if (input.is_active !== undefined) updatePayload.is_active = input.is_active;
   if (input.tenant_id !== undefined) updatePayload.tenant_id = input.tenant_id;
 
-  const { data, error } = await supabase
+  const { data, error } = await db
     .from('email_templates')
     .update(updatePayload)
     .eq('id', id)
@@ -139,8 +139,8 @@ async function updateEmailTemplate(id, input) {
 
 // Delete an email template by id
 async function deleteEmailTemplate(id) {
-  const supabase = getSupabaseAdmin();
-  const { error } = await supabase
+  const db = getDbAdmin();
+  const { error } = await db
     .from('email_templates')
     .delete()
     .eq('id', id);

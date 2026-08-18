@@ -58,7 +58,7 @@ async function ingestScrapedOrdersController(req, res) {
       });
     }
 
-    // Step 3: Store orders to Supabase Storage and create DB record
+    // Step 3: Store orders to object storage and create DB record
     // The DB record is created with processing_status = 'pending'
     const storeResult = await storeScrapedOrders({
       orders: validationResult.sanitizedOrders,

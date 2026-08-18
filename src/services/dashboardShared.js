@@ -5,7 +5,7 @@
  */
 
 const { executeDirectSQL } = require('../utils/postgresExecutor');
-const { getNotificationSupabase } = require('../config/notificationDatabase');
+const { getNotificationDb } = require('../config/notificationDatabase');
 
 /**
  * Build SQL exclusion conditions from exclusion patterns
@@ -329,8 +329,8 @@ function getTimeAgo(dateString) {
  */
 async function getRecentAlerts(userId) {
   try {
-    const supabase = getNotificationSupabase();
-    const { data, error } = await supabase
+    const db = getNotificationDb();
+    const { data, error } = await db
       .from('notification_queue')
       .select('id, subject, body, created_at, status')
       .eq('user_id', userId)
@@ -360,8 +360,8 @@ async function getRecentAlerts(userId) {
  */
 async function getUnreadNotificationCount(userId) {
   try {
-    const supabase = getNotificationSupabase();
-    const { count, error } = await supabase
+    const db = getNotificationDb();
+    const { count, error } = await db
       .from('notification_queue')
       .select('id', { count: 'exact', head: true })
       .eq('user_id', userId)
@@ -375,7 +375,7 @@ async function getUnreadNotificationCount(userId) {
 }
 
 /**
- * Get recent alerts + unread count in parallel (2 queries to notification Supabase).
+ * Get recent alerts + unread count in parallel (2 queries to notification the database).
  * Returns { alerts: Array, unreadCount: number }
  */
 async function getAlertsAndUnreadCount(userId) {
