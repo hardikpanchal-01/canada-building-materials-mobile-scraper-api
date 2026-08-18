@@ -4,7 +4,7 @@
  *
  * Runs the agentic dashboard-generation loop with the Vercel AI SDK and pipes
  * the UI-message SSE stream to an Express response. Identity comes from the
- * backend's JWT auth middleware (req.user.id) rather than a the database cookie.
+ * backend's JWT auth middleware (req.user.id) rather than a database cookie.
  */
 
 import {

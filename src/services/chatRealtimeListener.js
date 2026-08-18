@@ -292,7 +292,7 @@ function subscribeOne(config) {
 function startChatRealtimeListener() {
   // Kill switch — set CHAT_REALTIME_DISABLED=true on whichever backend you
   // don't want firing FCM (e.g. disable on production while testing locally,
-  // or vice versa) to avoid double-pushes when prod + local share a the database.
+  // or vice versa) to avoid double-pushes when prod + local share a database.
   if (
     process.env.CHAT_REALTIME_DISABLED === 'true' ||
     process.env.CHAT_REALTIME_DISABLED === '1'

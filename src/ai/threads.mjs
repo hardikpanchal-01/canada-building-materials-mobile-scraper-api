@@ -1,7 +1,7 @@
 /**
  * AI Assistant chat-thread persistence (ported from the web app's
  * /api/ai/threads routes). All queries are scoped to the authenticated
- * user's id (the the database auth UUID carried in the backend JWT).
+ * user's id (the database auth UUID carried in the backend JWT).
  */
 
 import { serverDb } from './_db.mjs';

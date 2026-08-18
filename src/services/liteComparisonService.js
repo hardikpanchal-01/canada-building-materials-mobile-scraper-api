@@ -125,7 +125,7 @@ async function compareLiteOrders({ sanitizedOrders, batchId }) {
 
   // Guard against a misleading "everything is missing" result. If we sent a
   // non-trivial batch but NOTHING was found in the system DB, it is almost
-  // always a transient DB fetch failure (e.g. the the database pooler dropped the
+  // always a transient DB fetch failure (e.g. the database pooler dropped the
   // connection) — not a real all-missing. Retry once; if still empty, throw so
   // the controller returns a retryable error instead of emailing a wrong report.
   if (sanitizedOrders.length >= 5 && foundCount(comparisonResult) === 0) {
