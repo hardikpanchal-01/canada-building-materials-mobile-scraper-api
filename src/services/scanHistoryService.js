@@ -4,7 +4,7 @@
  * CRUD operations for user-scoped QR scan history.
  */
 
-const { getSupabaseAdmin } = require('../config/database');
+const { getDbAdmin } = require('../config/database');
 
 const TABLE = 'scan_history';
 
@@ -15,13 +15,13 @@ const TABLE = 'scan_history';
  * @param {number} limit - records per page (default 20, max 100)
  */
 async function getHistory(userId, page = 1, limit = 20) {
-  const supabase = getSupabaseAdmin();
+  const db = getDbAdmin();
   const pageNum = Math.max(1, parseInt(page, 10) || 1);
   const limitNum = Math.min(Math.max(1, parseInt(limit, 10) || 20), 100);
   const offset = (pageNum - 1) * limitNum;
 
   // Single query: fetch paginated records + exact total count
-  const { data, count, error } = await supabase
+  const { data, count, error } = await db
     .from(TABLE)
     .select('*', { count: 'exact' })
     .eq('user_id', userId)
@@ -55,7 +55,7 @@ async function getHistory(userId, page = 1, limit = 20) {
  * Save a new scan record.
  */
 async function saveScan(userId, record) {
-  const supabase = getSupabaseAdmin();
+  const db = getDbAdmin();
 
   const row = {
     user_id: userId,
@@ -69,7 +69,7 @@ async function saveScan(userId, record) {
     api_data: record.apiData || null,
   };
 
-  const { data, error } = await supabase
+  const { data, error } = await db
     .from(TABLE)
     .upsert(row, { onConflict: 'user_id,scan_id' })
     .select()
@@ -87,9 +87,9 @@ async function saveScan(userId, record) {
  * Delete a single scan record by client scan_id.
  */
 async function deleteScan(userId, scanId) {
-  const supabase = getSupabaseAdmin();
+  const db = getDbAdmin();
 
-  const { error, count } = await supabase
+  const { error, count } = await db
     .from(TABLE)
     .delete()
     .eq('user_id', userId)
@@ -107,9 +107,9 @@ async function deleteScan(userId, scanId) {
  * Clear all scan history for a user.
  */
 async function clearHistory(userId) {
-  const supabase = getSupabaseAdmin();
+  const db = getDbAdmin();
 
-  const { error, count } = await supabase
+  const { error, count } = await db
     .from(TABLE)
     .delete()
     .eq('user_id', userId);

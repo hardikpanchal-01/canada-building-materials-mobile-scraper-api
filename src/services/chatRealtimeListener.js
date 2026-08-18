@@ -2,25 +2,26 @@
  * Chat realtime listener
  *
  * Subscribes to `public.chat_messages` INSERT events on every distinct tenant
- * Supabase project, then fans out FCM via chatService.notifyChatMessage.
+ * the database project, then fans out FCM via chatService.notifyChatMessage.
  *
- * Tenants are configured by env in TENANT_SUPABASES (JSON array). The shared
- * SUPABASE_URL/SUPABASE_SERVICE_KEY pair is auto-included as a fallback so
+ * Tenants are configured by env in TENANT_DB_CONFIGS (JSON array). The shared
+ * DATABASE_URL/DATABASE_URL pair is auto-included as a fallback so
  * single-project deployments work with no extra config.
  *
- * Example TENANT_SUPABASES value:
+ * Example TENANT_DB_CONFIGS value:
  *   [
- *     {"label":"shared","url":"https://lwplbyltqsfmfvsgmrjq.supabase.co","service_key":"...","subdomains":["dolese","hercules","preferredmaterials","sws"]},
- *     {"label":"concretesupply","url":"https://dqyhmnqrudybmkewwbku.supabase.co","service_key":"...","subdomains":["concretesupply"]},
- *     {"label":"delta","url":"https://etsemwbkyzwfhfktkndy.supabase.co","service_key":"...","subdomains":["delta"]},
- *     {"label":"sunrise","url":"https://ibziwfnjfwizjazfxntv.supabase.co","service_key":"...","subdomains":["sunrise"]}
+ *     {"label":"shared","url":"https://lwplbyltqsfmfvsgmrjq.the database.co","service_key":"...","subdomains":["dolese","hercules","preferredmaterials","sws"]},
+ *     {"label":"concretesupply","url":"https://dqyhmnqrudybmkewwbku.the database.co","service_key":"...","subdomains":["concretesupply"]},
+ *     {"label":"delta","url":"https://etsemwbkyzwfhfktkndy.the database.co","service_key":"...","subdomains":["delta"]},
+ *     {"label":"sunrise","url":"https://ibziwfnjfwizjazfxntv.the database.co","service_key":"...","subdomains":["sunrise"]}
  *   ]
  *
  * The "subdomains" field is informational only — the listener does not need
  * to resolve a per-message subdomain since the mobile tenant-switch is opt-in.
  */
 
-const { createClient } = require('@supabase/supabase-js');
+const pg = require('pg');
+const { getDb } = require('../config/database.js');
 const chatService = require('./chatService');
 
 const channels = [];
@@ -29,9 +30,9 @@ const clients = [];
 function loadTenantConfigs() {
   const configs = [];
 
-  if (process.env.TENANT_SUPABASES) {
+  if (process.env.TENANT_DB_CONFIGS) {
     try {
-      const parsed = JSON.parse(process.env.TENANT_SUPABASES);
+      const parsed = JSON.parse(process.env.TENANT_DB_CONFIGS);
       if (Array.isArray(parsed)) {
         for (const entry of parsed) {
           if (entry && entry.url && entry.service_key) {
@@ -45,18 +46,17 @@ function loadTenantConfigs() {
         }
       }
     } catch (err) {
-      console.error('[ChatRealtime] TENANT_SUPABASES parse error:', err.message);
+      console.error('[ChatRealtime] TENANT_DB_CONFIGS parse error:', err.message);
     }
   }
 
-  // Auto-include the primary SUPABASE_URL if not already present
-  if (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY) {
-    const exists = configs.find((c) => c.url === process.env.SUPABASE_URL);
+  // Auto-include the primary DATABASE_URL if not already present
+  if (process.env.DATABASE_URL) {
+    const exists = configs.find((c) => c.connectionString === process.env.DATABASE_URL);
     if (!exists) {
       configs.push({
         label: 'primary',
-        url: process.env.SUPABASE_URL,
-        service_key: process.env.SUPABASE_SERVICE_KEY,
+        connectionString: process.env.DATABASE_URL,
         subdomains: [],
       });
     }
@@ -75,8 +75,8 @@ function buildPreview(text, attachments) {
   return '';
 }
 
-async function fetchActiveRecipients(supabase, senderId) {
-  const { data, error } = await supabase
+async function fetchActiveRecipients(db, senderId) {
+  const { data, error } = await db
     .from('users')
     .select('id')
     .eq('active', true);
@@ -94,8 +94,8 @@ async function fetchActiveRecipients(supabase, senderId) {
     .filter((id) => id && id !== senderId);
 }
 
-async function fetchOrderMeta(supabase, orderId) {
-  const { data, error } = await supabase
+async function fetchOrderMeta(db, orderId) {
+  const { data, error } = await db
     .from('orders')
     .select('order_id, order_code, order_date, customer_name')
     .eq('order_id', orderId)
@@ -118,13 +118,11 @@ async function handleInsert(config, payload) {
   if (!row.sender_id || !row.order_id) return;
 
   try {
-    const supabase = createClient(config.url, config.service_key, {
-      auth: { autoRefreshToken: false, persistSession: false },
-    });
+    const db = getDb();
 
     const [recipients, orderMeta] = await Promise.all([
-      fetchActiveRecipients(supabase, row.sender_id),
-      fetchOrderMeta(supabase, row.order_id),
+      fetchActiveRecipients(db, row.sender_id),
+      fetchOrderMeta(db, row.order_id),
     ]);
 
     if (recipients.length === 0) {
@@ -163,8 +161,8 @@ async function handleInsert(config, payload) {
   }
 }
 
-async function fetchOrderEntityMeta(supabase, orderEntityId) {
-  const { data, error } = await supabase
+async function fetchOrderEntityMeta(db, orderEntityId) {
+  const { data, error } = await db
     .from('order_entities')
     .select('id, job_name, company_name, on_job_date')
     .eq('id', orderEntityId)
@@ -186,13 +184,11 @@ async function handleOrderEntityInsert(config, payload) {
   if (!row.sender_id || !row.order_entity_id) return;
 
   try {
-    const supabase = createClient(config.url, config.service_key, {
-      auth: { autoRefreshToken: false, persistSession: false },
-    });
+    const db = getDb();
 
     const [recipients, meta] = await Promise.all([
-      fetchActiveRecipients(supabase, row.sender_id),
-      fetchOrderEntityMeta(supabase, row.order_entity_id),
+      fetchActiveRecipients(db, row.sender_id),
+      fetchOrderEntityMeta(db, row.order_entity_id),
     ]);
 
     if (recipients.length === 0) {
@@ -229,60 +225,74 @@ async function handleOrderEntityInsert(config, payload) {
 }
 
 function subscribeOne(config) {
-  const client = createClient(config.url, config.service_key, {
-    auth: { autoRefreshToken: false, persistSession: false },
+  // Transport: a dedicated Postgres LISTEN connection.
+  //
+  // This used to open a hosted realtime websocket per tenant project. Realtime
+  // now arrives as LISTEN/NOTIFY on the `realtime_changes` channel, which a
+  // trigger publishes to.
+  //
+  // NOTE: the trigger currently covers only some tables. Until one exists for
+  // `chat_messages` and `order_entity_messages`, this connection stays open but
+  // receives nothing — the same practical state as before, since the listener is
+  // disabled by CHAT_REALTIME_DISABLED. Adding the trigger switches it on with
+  // no code change here.
+  const connectionString =
+    config.connectionString || process.env.DATABASE_URL;
+  if (!connectionString) {
+    console.warn(
+      `[ChatRealtime][${config.label}] no DATABASE_URL — listener not started`,
+    );
+    return;
+  }
+
+  const client = new pg.Client({
+    connectionString,
+    ssl:
+      process.env.DATABASE_SSL === 'false' ? false : { rejectUnauthorized: false },
   });
   clients.push(client);
 
-  // Order chat (chat_messages → orders)
-  const chatChannel = client
-    .channel(`chat-messages-watcher-${config.label}`)
-    .on(
-      'postgres_changes',
-      { event: 'INSERT', schema: 'public', table: 'chat_messages' },
-      (payload) => handleInsert(config, payload),
-    )
-    .subscribe((status, err) => {
-      if (err) {
-        console.error(
-          `[ChatRealtime][${config.label}] chat_messages subscribe error:`,
-          err.message || err,
-        );
-      } else {
-        console.log(
-          `[ChatRealtime][${config.label}] chat_messages: ${status}`,
-        );
-      }
-    });
-  channels.push(chatChannel);
+  const WATCHED = {
+    chat_messages: (payload) => handleInsert(config, payload),
+    order_entity_messages: (payload) => handleOrderEntityInsert(config, payload),
+  };
 
-  // Order Request chat (order_entity_messages → order_entities)
-  const reqChannel = client
-    .channel(`order-entity-messages-watcher-${config.label}`)
-    .on(
-      'postgres_changes',
-      { event: 'INSERT', schema: 'public', table: 'order_entity_messages' },
-      (payload) => handleOrderEntityInsert(config, payload),
-    )
-    .subscribe((status, err) => {
-      if (err) {
-        console.error(
-          `[ChatRealtime][${config.label}] order_entity_messages subscribe error:`,
-          err.message || err,
-        );
-      } else {
-        console.log(
-          `[ChatRealtime][${config.label}] order_entity_messages: ${status}`,
-        );
-      }
+  client
+    .connect()
+    .then(() => client.query("LISTEN realtime_changes"))
+    .then(() => {
+      console.log(`[ChatRealtime][${config.label}] listening on realtime_changes`);
+    })
+    .catch((err) => {
+      console.error(
+        `[ChatRealtime][${config.label}] LISTEN failed:`,
+        err.message,
+      );
     });
-  channels.push(reqChannel);
+
+  client.on('notification', (msg) => {
+    let event;
+    try {
+      event = JSON.parse(msg.payload);
+    } catch {
+      return;
+    }
+    if (event.type !== 'INSERT') return;
+    const handler = WATCHED[event.table];
+    if (!handler) return;
+    // Match the payload shape the handlers already expect.
+    handler({ new: event.new, old: event.old });
+  });
+
+  client.on('error', (err) => {
+    console.error(`[ChatRealtime][${config.label}] connection error:`, err.message);
+  });
 }
 
 function startChatRealtimeListener() {
   // Kill switch — set CHAT_REALTIME_DISABLED=true on whichever backend you
   // don't want firing FCM (e.g. disable on production while testing locally,
-  // or vice versa) to avoid double-pushes when prod + local share a Supabase.
+  // or vice versa) to avoid double-pushes when prod + local share a database.
   if (
     process.env.CHAT_REALTIME_DISABLED === 'true' ||
     process.env.CHAT_REALTIME_DISABLED === '1'
@@ -296,13 +306,13 @@ function startChatRealtimeListener() {
   let configs = loadTenantConfigs();
   if (configs.length === 0) {
     console.warn(
-      '[ChatRealtime] no Supabase configs found — listener disabled',
+      '[ChatRealtime] no database configs found — listener disabled',
     );
     return;
   }
 
   // Per-project disable — comma-separated list of labels (e.g. "primary,sunrise")
-  // matching the `label` field in TENANT_SUPABASES (auto-included primary uses
+  // matching the `label` field in TENANT_DB_CONFIGS (auto-included primary uses
   // label "primary"). Use this when one tenant's prod backend already fires FCM
   // (so local should skip it) but other tenants' prod is down (local must fire).
   const disabledRaw = process.env.CHAT_REALTIME_DISABLED_PROJECTS;
@@ -331,7 +341,7 @@ function startChatRealtimeListener() {
   }
 
   console.log(
-    `[ChatRealtime] starting listener for ${configs.length} tenant Supabase project(s)`,
+    `[ChatRealtime] starting listener for ${configs.length} tenant database(s)`,
   );
   for (const cfg of configs) {
     subscribeOne(cfg);
@@ -341,9 +351,9 @@ function startChatRealtimeListener() {
 async function stopChatRealtimeListener() {
   console.log('[ChatRealtime] stopping listener…');
   await Promise.allSettled(
-    channels.map((ch) =>
-      ch.unsubscribe().catch((err) =>
-        console.error('[ChatRealtime] unsubscribe error:', err.message),
+    clients.map((c) =>
+      c.end().catch((err) =>
+        console.error('[ChatRealtime] disconnect error:', err.message),
       ),
     ),
   );

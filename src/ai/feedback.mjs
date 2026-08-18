@@ -1,5 +1,5 @@
 /** Thumbs-up/down feedback on an AI answer (ported from /api/ai/feedback). */
-import { supabaseServer } from './_supabase.mjs';
+import { serverDb } from './_db.mjs';
 
 export async function recordFeedback({ auditLogId, rating, comment } = {}) {
   const id = typeof auditLogId === 'number' ? auditLogId : null;
@@ -8,7 +8,7 @@ export async function recordFeedback({ auditLogId, rating, comment } = {}) {
   if (id === null || r === null) {
     throw Object.assign(new Error("auditLogId (number) and rating ('up'|'down') are required"), { status: 400 });
   }
-  const { error } = await supabaseServer.rpc('ai_record_feedback', {
+  const { error } = await serverDb.rpc('ai_record_feedback', {
     p_id: id,
     p_rating: r,
     p_comment: c,

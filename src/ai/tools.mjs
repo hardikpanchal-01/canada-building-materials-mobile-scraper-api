@@ -5,7 +5,7 @@ import {
   executeAggregate,
 } from "./query-executor.mjs";
 import { BLOCKED_TABLES } from "./sql-safety.mjs";
-import { supabaseServer } from "./_supabase.mjs";
+import { serverDb } from "./_db.mjs";
 import { resolveRelativeDateRange } from "./date-resolver.mjs";
 import { withAuditLog } from "./audit-log.mjs";
 import { model } from "./provider.mjs";
@@ -1226,7 +1226,7 @@ export const tools = {
 
       try {
         if (tableName) {
-          const { data, error } = await supabaseServer
+          const { data, error } = await serverDb
             .from(tableName)
             .select("*")
             .limit(1);

@@ -1,4 +1,4 @@
-const { getSupabaseAdmin: getSupabase } = require('../config/database');
+const { getDbAdmin: getDb } = require('../config/database');
 
 // Configuration
 const MAX_RETRIES = 3;
@@ -144,12 +144,12 @@ async function registerOrUpdateDevice(userId, deviceInfo) {
     // Use device_token as device_id if not provided
     const deviceId = deviceInfo.device_id || deviceInfo.device_token;
     
-    const supabase = getSupabase();
+    const db = getDb();
     const now = new Date().toISOString();
     
     // Check if device_token already exists (may have duplicates, so use limit(1))
     const checkDevice = async () => {
-      const { data, error: checkError } = await supabase
+      const { data, error: checkError } = await db
         .from('user_devices')
         .select('id, user_id')
         .eq('device_token', deviceInfo.device_token)
@@ -189,7 +189,7 @@ async function registerOrUpdateDevice(userId, deviceInfo) {
     if (existingDevice) {
       // Update existing device by device_token (may match multiple rows)
       const updateDevice = async () => {
-        const { data, error } = await supabase
+        const { data, error } = await db
           .from('user_devices')
           .update(deviceData)
           .eq('device_token', deviceInfo.device_token)
@@ -207,7 +207,7 @@ async function registerOrUpdateDevice(userId, deviceInfo) {
       console.log(`✅ Device updated: ${deviceInfo.device_token.substring(0, 20)}... for user ${userId}`);
     } else {
       // Check device limit before inserting
-      const { data: userDevices, error: countError } = await supabase
+      const { data: userDevices, error: countError } = await db
         .from('user_devices')
         .select('id', { count: 'exact' })
         .eq('user_id', userId)
@@ -215,7 +215,7 @@ async function registerOrUpdateDevice(userId, deviceInfo) {
       
       if (!countError && userDevices && userDevices.length >= MAX_DEVICES_PER_USER) {
         // Deactivate oldest inactive device or oldest active device
-        const { data: oldestDevices } = await supabase
+        const { data: oldestDevices } = await db
           .from('user_devices')
           .select('id')
           .eq('user_id', userId)
@@ -224,7 +224,7 @@ async function registerOrUpdateDevice(userId, deviceInfo) {
 
         const oldestDevice = oldestDevices && oldestDevices.length > 0 ? oldestDevices[0] : null;
         if (oldestDevice) {
-          await supabase
+          await db
             .from('user_devices')
             .update({ is_active: false })
             .eq('id', oldestDevice.id);
@@ -240,7 +240,7 @@ async function registerOrUpdateDevice(userId, deviceInfo) {
           created_at: now
         };
         
-        const { data, error } = await supabase
+        const { data, error } = await db
           .from('user_devices')
           .insert(insertData)
           .select()
@@ -250,7 +250,7 @@ async function registerOrUpdateDevice(userId, deviceInfo) {
           // Handle duplicate token error gracefully
           if (error.code === '23505' || error.message?.includes('duplicate')) {
             // Token was inserted between check and insert, try update instead
-            const { data: updatedData, error: updateError } = await supabase
+            const { data: updatedData, error: updateError } = await db
               .from('user_devices')
               .update(deviceData)
               .eq('device_token', deviceInfo.device_token.trim())
@@ -291,10 +291,10 @@ async function deactivateDeviceToken(deviceToken) {
       throw new Error('device_token is required');
     }
     
-    const supabase = getSupabase();
+    const db = getDb();
     
     const deactivate = async () => {
-      const { data, error } = await supabase
+      const { data, error } = await db
         .from('user_devices')
         .update({ is_active: false })
         .eq('device_token', deviceToken)
@@ -335,10 +335,10 @@ async function deactivateUserDeviceToken(userId, deviceToken) {
       throw new Error('user_id and device_token are required');
     }
     
-    const supabase = getSupabase();
+    const db = getDb();
     
     // Verify token belongs to user before deactivating
-    const { data: devices, error: checkError } = await supabase
+    const { data: devices, error: checkError } = await db
       .from('user_devices')
       .select('id')
       .eq('device_token', deviceToken)
@@ -367,10 +367,10 @@ async function deactivateAllUserDevices(userId) {
       throw new Error('user_id is required');
     }
     
-    const supabase = getSupabase();
+    const db = getDb();
     
     const deactivate = async () => {
-      const { data, error } = await supabase
+      const { data, error } = await db
         .from('user_devices')
         .update({ is_active: false })
         .eq('user_id', userId)
@@ -421,10 +421,10 @@ async function getUserDevices(userId) {
       throw new Error('user_id is required');
     }
     
-    const supabase = getSupabase();
+    const db = getDb();
     
     const fetchDevices = async () => {
-      const { data, error } = await supabase
+      const { data, error } = await db
         .from('user_devices')
         .select('*')
         .eq('user_id', userId)
@@ -470,9 +470,9 @@ async function batchGetUserDeviceTokens(userIds) {
       return {};
     }
     
-    const supabase = getSupabase();
+    const db = getDb();
     
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('user_devices')
       .select('user_id, device_token')
       .in('user_id', userIds)
@@ -515,7 +515,7 @@ async function batchDeactivateTokens(deviceTokens) {
       return 0;
     }
     
-    const supabase = getSupabase();
+    const db = getDb();
     
     // Process in batches of 100 to avoid query size limits
     const batchSize = 100;
@@ -525,7 +525,7 @@ async function batchDeactivateTokens(deviceTokens) {
       const batch = deviceTokens.slice(i, i + batchSize);
       
       const deactivate = async () => {
-        const { data, error } = await supabase
+        const { data, error } = await db
           .from('user_devices')
           .update({ is_active: false })
           .in('device_token', batch)
@@ -558,7 +558,7 @@ async function batchDeactivateTokens(deviceTokens) {
  */
 async function cleanupInactiveTokens(daysOld = TOKEN_CLEANUP_DAYS) {
   try {
-    const supabase = getSupabase();
+    const db = getDb();
     const cutoffDate = new Date();
     cutoffDate.setDate(cutoffDate.getDate() - daysOld);
     const cutoffISO = cutoffDate.toISOString();
@@ -573,7 +573,7 @@ async function cleanupInactiveTokens(daysOld = TOKEN_CLEANUP_DAYS) {
     while (hasMore) {
       const cleanup = async () => {
         // First, get IDs of tokens to delete
-        const { data: tokensToDelete, error: selectError } = await supabase
+        const { data: tokensToDelete, error: selectError } = await db
           .from('user_devices')
           .select('id')
           .eq('is_active', false)
@@ -592,7 +592,7 @@ async function cleanupInactiveTokens(daysOld = TOKEN_CLEANUP_DAYS) {
         const ids = tokensToDelete.map(t => t.id);
         
         // Delete the tokens
-        const { error: deleteError } = await supabase
+        const { error: deleteError } = await db
           .from('user_devices')
           .delete()
           .in('id', ids);

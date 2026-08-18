@@ -1,4 +1,4 @@
-const { getSupabaseAdmin } = require('../config/database');
+const { getDbAdmin } = require('../config/database');
 const deviceService = require('./deviceService');
 const { getMessaging } = require('../config/Firebase');
 
@@ -6,9 +6,9 @@ const { getMessaging } = require('../config/Firebase');
  * Get read status (last_read_at) for all orders the user has read
  */
 async function getReadStatus(userId) {
-  const supabase = getSupabaseAdmin();
+  const db = getDbAdmin();
 
-  const { data, error } = await supabase
+  const { data, error } = await db
     .from('chat_read_status')
     .select('order_id, last_read_at')
     .eq('user_id', userId);
@@ -26,7 +26,7 @@ async function getReadStatus(userId) {
  * Compares chat_messages.created_at against chat_read_status.last_read_at.
  */
 async function getUnreadCounts(userId, orderIds) {
-  const supabase = getSupabaseAdmin();
+  const db = getDbAdmin();
 
   // Get user's read statuses
   const readStatuses = await getReadStatus(userId);
@@ -39,7 +39,7 @@ async function getUnreadCounts(userId, orderIds) {
   const counts = {};
 
   // If specific orderIds provided, filter to those; otherwise get all
-  let query = supabase
+  let query = db
     .from('chat_messages')
     .select('order_id, created_at')
     .eq('is_deleted', false)
@@ -79,12 +79,12 @@ async function getUnreadCounts(userId, orderIds) {
  * Upserts into chat_read_status with current timestamp.
  */
 async function markAsRead(userId, orderId) {
-  const supabase = getSupabaseAdmin();
+  const db = getDbAdmin();
 
   // Add 2-second buffer to catch in-flight messages
   const lastReadAt = new Date(Date.now() + 2000).toISOString();
 
-  const { data, error } = await supabase
+  const { data, error } = await db
     .from('chat_read_status')
     .upsert(
       {
