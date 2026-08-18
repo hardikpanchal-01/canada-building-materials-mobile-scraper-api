@@ -6,7 +6,7 @@
  * row for that user. Fails open to defaults; env vars are the key fallback.
  */
 
-import { supabaseServer } from './_supabase.mjs';
+import { serverDb } from './_db.mjs';
 import { encrypt, decrypt } from './encryption.mjs';
 import { MODELS, DEFAULT_MODEL_ID } from './models.mjs';
 
@@ -33,7 +33,7 @@ export function defaultAiSettings() {
 export async function getAiSettings(userId) {
   if (!userId) return defaultAiSettings();
   try {
-    const { data, error } = await supabaseServer
+    const { data, error } = await serverDb
       .from('ai_settings')
       .select(
         `enabled_model_ids, default_model_id, monthly_allotment, bonus_tokens,
@@ -63,7 +63,7 @@ export async function getAiSettings(userId) {
 async function readProviderKeysFromDb(userId) {
   if (!userId) return null;
   try {
-    const { data, error } = await supabaseServer
+    const { data, error } = await serverDb
       .from('ai_settings')
       .select(
         `google_api_key, anthropic_api_key, copilot_api_key,
@@ -125,7 +125,7 @@ export async function getMonthToDateTokens() {
   try {
     const now = new Date();
     const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString();
-    const { data, error } = await supabaseServer
+    const { data, error } = await serverDb
       .from('ai_token_usage')
       .select('total_tokens')
       .gte('created_at', monthStart);
@@ -143,7 +143,7 @@ export async function getTokenBankStatus(userId) {
   let bonusTokens = settings.bonusTokens;
   if (userId && settings.tokenPeriodStart < currentPeriod) {
     bonusTokens = 0;
-    void supabaseServer
+    void serverDb
       .from('ai_settings')
       .update({ bonus_tokens: 0, token_period_start: currentPeriod })
       .eq('user_id', userId);
@@ -195,7 +195,7 @@ export async function updateAiSettings(userId, input = {}) {
     }
     if (input.addBonusTokens && input.addBonusTokens > 0) {
       const currentPeriod = currentPeriodStart();
-      const { data } = await supabaseServer
+      const { data } = await serverDb
         .from('ai_settings')
         .select('bonus_tokens, token_period_start')
         .eq('user_id', userId)
@@ -226,7 +226,7 @@ export async function updateAiSettings(userId, input = {}) {
       }
     }
 
-    const { error } = await supabaseServer
+    const { error } = await serverDb
       .from('ai_settings')
       .upsert({ user_id: userId, ...updates, updated_at: new Date().toISOString() }, { onConflict: 'user_id' });
     if (error) {

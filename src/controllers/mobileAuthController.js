@@ -324,7 +324,6 @@ async function login(req, res) {
  *                                 tenant_client_id:
  *                                   type: string
  *                                   format: uuid
- *                                 tenant_supabase_url:
  *                                   type: string
  *                                 tenant_backend_url:
  *                                   type: string
@@ -451,7 +450,6 @@ async function exchangeCode(req, res) {
         user: result.user,
         timezone: result.timezone,
         company_timezone: result.company_timezone || null,
-        supabase_config: result.supabase_config,
         accessToken: result.accessToken,
         refreshToken: result.refreshToken
       }
@@ -695,7 +693,6 @@ async function switchTenant(req, res) {
         client_secret: result.client_secret,
         expires_in: result.expires_in,
         tenant: result.tenant,
-        supabase_config: result.supabase_config
       }
     });
   } catch (error) {

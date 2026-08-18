@@ -7,7 +7,7 @@
  * - Cleanup expired codes
  */
 
-const { getAuthSupabaseAdmin } = require('../config/authDatabase');
+const { getAuthDbAdmin } = require('../config/authDatabase');
 const { generateAuthCode } = require('../utils/encryptionUtils');
 
 // Code expiry time in seconds
@@ -22,14 +22,14 @@ const CODE_EXPIRY_SECONDS = 60;
  * @returns {Object} { code, expires_at }
  */
 async function createAuthCode({ userId, email, tenantId }) {
-  const supabase = getAuthSupabaseAdmin();
+  const db = getAuthDbAdmin();
 
   const code = generateAuthCode(); // 64-char hex string
   const expiresAt = new Date(Date.now() + CODE_EXPIRY_SECONDS * 1000);
 
   console.log('[AuthCode] Creating auth code for user:', userId, 'tenant:', tenantId);
 
-  const { data, error } = await supabase
+  const { data, error } = await db
     .schema('auth_tenant')
     .from('auth_codes')
     .insert({
@@ -67,10 +67,10 @@ async function createAuthCode({ userId, email, tenantId }) {
  * @returns {Object} { valid, user_id, email, error }
  */
 async function consumeAuthCode(code, tenantId) {
-  const supabase = getAuthSupabaseAdmin();
+  const db = getAuthDbAdmin();
 
   // Get the code record
-  const { data: codeData, error: fetchError } = await supabase
+  const { data: codeData, error: fetchError } = await db
     .schema('auth_tenant')
     .from('auth_codes')
     .select('*')
@@ -104,7 +104,7 @@ async function consumeAuthCode(code, tenantId) {
   }
 
   // Mark code as consumed (atomic operation with check)
-  const { data: updatedCode, error: updateError } = await supabase
+  const { data: updatedCode, error: updateError } = await db
     .schema('auth_tenant')
     .from('auth_codes')
     .update({ consumed_at: new Date().toISOString() })
@@ -132,9 +132,9 @@ async function consumeAuthCode(code, tenantId) {
  * @returns {Object|null} Code record
  */
 async function getAuthCode(code) {
-  const supabase = getAuthSupabaseAdmin();
+  const db = getAuthDbAdmin();
 
-  const { data, error } = await supabase
+  const { data, error } = await db
     .schema('auth_tenant')
     .from('auth_codes')
     .select('*')
@@ -156,12 +156,12 @@ async function getAuthCode(code) {
  * @returns {number} Number of deleted codes
  */
 async function cleanupExpiredCodes() {
-  const supabase = getAuthSupabaseAdmin();
+  const db = getAuthDbAdmin();
 
   const cutoffTime = new Date(Date.now() - 60 * 60 * 1000); // 1 hour ago
 
   // Delete expired or consumed codes older than 1 hour
-  const { data, error } = await supabase
+  const { data, error } = await db
     .schema('auth_tenant')
     .from('auth_codes')
     .delete()
@@ -182,9 +182,9 @@ async function cleanupExpiredCodes() {
  * @returns {number} Number of deleted codes
  */
 async function deleteUserCodes(userId) {
-  const supabase = getAuthSupabaseAdmin();
+  const db = getAuthDbAdmin();
 
-  const { data, error } = await supabase
+  const { data, error } = await db
     .schema('auth_tenant')
     .from('auth_codes')
     .delete()

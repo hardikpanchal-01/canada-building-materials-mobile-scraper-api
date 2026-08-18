@@ -4,7 +4,7 @@
  *
  * Runs the agentic dashboard-generation loop with the Vercel AI SDK and pipes
  * the UI-message SSE stream to an Express response. Identity comes from the
- * backend's JWT auth middleware (req.user.id) rather than a Supabase cookie.
+ * backend's JWT auth middleware (req.user.id) rather than a database cookie.
  */
 
 import {
@@ -21,7 +21,7 @@ import { getModelDef } from './models.mjs';
 import { tools } from './tools.mjs';
 import { getSystemPrompt } from './system-prompt.mjs';
 import { runWithAuditContext } from './audit-log.mjs';
-import { supabaseServer } from './_supabase.mjs';
+import { serverDb } from './_db.mjs';
 
 function firstUserMessageText(messages) {
   for (const m of messages || []) {
@@ -92,7 +92,7 @@ export async function handleDashboardChat(body, res) {
   // Ensure a thread exists up front so audit-log + persistence can attribute.
   let threadId = incomingThreadId ?? null;
   if (!threadId && userId) {
-    const { data: created, error } = await supabaseServer
+    const { data: created, error } = await serverDb
       .from('ai_chat_threads')
       .insert({ user_id: userId, messages: [] })
       .select('id')
@@ -151,7 +151,7 @@ export async function handleDashboardChat(body, res) {
         const estimatedCost =
           (inputTokens * (def.inputPricePer1M || 0)) / 1_000_000 +
           (outputTokens * (def.outputPricePer1M || 0)) / 1_000_000;
-        void supabaseServer
+        void serverDb
           .from('ai_token_usage')
           .insert({
             user_id: userId,
@@ -173,14 +173,14 @@ export async function handleDashboardChat(body, res) {
       // Auto-generate a title on the first exchange.
       if (!threadId || !userId || !question) return;
       try {
-        const { data: existing } = await supabaseServer
+        const { data: existing } = await serverDb
           .from('ai_chat_threads')
           .select('title')
           .eq('id', threadId)
           .single();
         if (!existing || existing.title) return;
         const title = await generateThreadTitle(question, getModel(undefined, modelKeys));
-        await supabaseServer
+        await serverDb
           .from('ai_chat_threads')
           .update({ title, updated_at: new Date().toISOString() })
           .eq('id', threadId);

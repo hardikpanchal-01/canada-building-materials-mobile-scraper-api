@@ -101,7 +101,7 @@ function decrypt(encryptedData) {
  * Decrypt a tenant secret that was encrypted by the admin app (admin-truckast-ai).
  *
  * The admin app is the single writer of encrypted tenant fields (client_secret,
- * supabase keys) in the shared `auth_tenant` DB. Its scheme differs from this
+ * db keys) in the shared `auth_tenant` DB. Its scheme differs from this
  * service's local `encrypt`/`decrypt`:
  *   - key = sha256(ENCRYPTION_SECRET_KEY)   (passphrase hashed, NOT a raw hex key)
  *   - 16-byte IV, default 16-byte GCM auth tag

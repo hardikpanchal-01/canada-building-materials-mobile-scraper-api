@@ -1,11 +1,11 @@
-const { getSupabaseAdmin } = require('../config/database');
-const { getAuthSupabaseAdmin } = require('../config/authDatabase');
+const { getDbAdmin } = require('../config/database');
+const { getAuthDbAdmin } = require('../config/authDatabase');
 const { requestEmailOtp, requestPhoneOtp, verifyOtp, isVerified } = require('./otpService');
 const { hashPassword } = require('../utils/encryptionUtils');
 
 /**
  * Normalize phone number for comparison — strips +, spaces, dashes
- * Supabase Auth stores phones inconsistently (sometimes with +, sometimes without)
+ * the auth store stores phones inconsistently (sometimes with +, sometimes without)
  */
 function normalizePhone(phone) {
   if (!phone) return '';
@@ -21,7 +21,7 @@ function phonesMatch(a, b) {
  * Step 1: Initial signup - collect basic info and send email OTP
  *
  * Creates a pending signup record in signup_pending table and sends
- * an email OTP. The user is NOT created in Supabase Auth until both
+ * an email OTP. The user is NOT created in the auth store until both
  * email and phone are verified.
  *
  * Password is NOT required at signup. A random password is generated
@@ -34,13 +34,13 @@ function phonesMatch(a, b) {
  * @returns {Object} { success, message, error, code }
  */
 async function signup({ email, full_name }) {
-  const supabase = getSupabaseAdmin();
+  const db = getDbAdmin();
   const normalizedEmail = email.toLowerCase().trim();
 
   console.log('[Signup] Checking email:', normalizedEmail);
 
   // Check if email already exists as a fully registered user in public.users
-  const { data: existingUser, error: userQueryError } = await supabase
+  const { data: existingUser, error: userQueryError } = await db
     .from('users')
     .select('id, active')
     .eq('email', normalizedEmail)
@@ -56,10 +56,10 @@ async function signup({ email, full_name }) {
     console.log('[Signup] Inactive user found, allowing re-signup for:', normalizedEmail);
   }
 
-  // Check Supabase Auth for existing user with this email (skip if inactive user found — they'll be in auth already)
+  // Check the auth store for existing user with this email (skip if inactive user found — they'll be in auth already)
   if (!existingUser || existingUser.length === 0) {
     try {
-      const { data: authList, error: authListError } = await supabase.auth.admin.listUsers({
+      const { data: authList, error: authListError } = await db.auth.admin.listUsers({
         page: 1,
         perPage: 1000
       });
@@ -81,7 +81,7 @@ async function signup({ email, full_name }) {
 
   // Check if there's already a pending signup with verified steps
   // This applies to ALL users (new, inactive, or re-signup) so they can resume where they left off
-  const { data: existingPending } = await supabase
+  const { data: existingPending } = await db
     .from('signup_pending')
     .select('email_verified, phone_verified')
     .eq('email', normalizedEmail)
@@ -89,7 +89,7 @@ async function signup({ email, full_name }) {
 
   if (existingPending && existingPending.length > 0 && existingPending[0].email_verified) {
     // Update name in case it changed (don't reset verification flags)
-    await supabase
+    await db
       .from('signup_pending')
       .update({ full_name, updated_at: new Date().toISOString() })
       .eq('email', normalizedEmail);
@@ -103,7 +103,7 @@ async function signup({ email, full_name }) {
   }
 
   // No verified steps — upsert a fresh pending record
-  const { error: pendingError } = await supabase
+  const { error: pendingError } = await db
     .from('signup_pending')
     .upsert({
       email: normalizedEmail,
@@ -143,10 +143,10 @@ async function signup({ email, full_name }) {
  */
 async function verifyEmailOtp(email, otp) {
   const normalizedEmail = email.toLowerCase().trim();
-  const supabase = getSupabaseAdmin();
+  const db = getDbAdmin();
 
   // Ensure there's a pending signup for this email
-  const { data: pending } = await supabase
+  const { data: pending } = await db
     .from('signup_pending')
     .select('*')
     .eq('email', normalizedEmail)
@@ -167,7 +167,7 @@ async function verifyEmailOtp(email, otp) {
   }
 
   // Mark email as verified in pending record
-  await supabase
+  await db
     .from('signup_pending')
     .update({ email_verified: true, updated_at: new Date().toISOString() })
     .eq('email', normalizedEmail);
@@ -188,10 +188,10 @@ async function verifyEmailOtp(email, otp) {
  */
 async function sendPhoneOtpForSignup(email, phone_country_code, phone_number) {
   const normalizedEmail = email.toLowerCase().trim();
-  const supabase = getSupabaseAdmin();
+  const db = getDbAdmin();
 
   // Check pending signup exists and email is verified
-  const { data: pending } = await supabase
+  const { data: pending } = await db
     .from('signup_pending')
     .select('*')
     .eq('email', normalizedEmail)
@@ -209,7 +209,7 @@ async function sendPhoneOtpForSignup(email, phone_country_code, phone_number) {
   const fullPhone = `${phone_country_code}${phone_number}`.replace(/\s+/g, '');
 
   // Check if phone number belongs to a different active user
-  const { data: phoneOwners } = await supabase
+  const { data: phoneOwners } = await db
     .from('users')
     .select('email, active')
     .eq('phone_number', phone_number)
@@ -226,7 +226,7 @@ async function sendPhoneOtpForSignup(email, phone_country_code, phone_number) {
   }
 
   // Update phone in pending record
-  await supabase
+  await db
     .from('signup_pending')
     .update({
       phone_number,
@@ -257,9 +257,9 @@ async function sendPhoneOtpForSignup(email, phone_country_code, phone_number) {
  */
 async function verifyPhoneOtp(email, otp) {
   const normalizedEmail = email.toLowerCase().trim();
-  const supabase = getSupabaseAdmin();
+  const db = getDbAdmin();
 
-  const { data: pending } = await supabase
+  const { data: pending } = await db
     .from('signup_pending')
     .select('*')
     .eq('email', normalizedEmail)
@@ -286,7 +286,7 @@ async function verifyPhoneOtp(email, otp) {
   }
 
   // Mark phone as verified — do NOT create user yet (password step pending)
-  await supabase
+  await db
     .from('signup_pending')
     .update({ phone_verified: true, updated_at: new Date().toISOString() })
     .eq('email', normalizedEmail);
@@ -300,7 +300,7 @@ async function verifyPhoneOtp(email, otp) {
 /**
  * Step 5: Set password and complete registration
  *
- * Creates the real user in Supabase Auth + public.users with the user-chosen password.
+ * Creates the real user in the auth store + public.users with the user-chosen password.
  * Only allowed after both email and phone are verified.
  *
  * @param {string} email
@@ -309,10 +309,10 @@ async function verifyPhoneOtp(email, otp) {
  */
 async function setPasswordAndComplete(email, password) {
   const normalizedEmail = email.toLowerCase().trim();
-  const supabase = getSupabaseAdmin();
+  const db = getDbAdmin();
 
   // Load pending signup
-  const { data: pending } = await supabase
+  const { data: pending } = await db
     .from('signup_pending')
     .select('*')
     .eq('email', normalizedEmail)
@@ -336,7 +336,7 @@ async function setPasswordAndComplete(email, password) {
   // ── Email uniqueness validation across all user tables ──
 
   // 1. Check public.users (no limit — need full count for duplicate detection)
-  const { data: publicUsers, error: publicQueryErr } = await supabase
+  const { data: publicUsers, error: publicQueryErr } = await db
     .from('users')
     .select('id, active, phone_number, phone_country_code')
     .eq('email', normalizedEmail);
@@ -352,8 +352,8 @@ async function setPasswordAndComplete(email, password) {
   }
 
   // 2. Check auth_tenant.users
-  const authSupabase = getAuthSupabaseAdmin();
-  const { data: tenantUsers, error: tenantQueryErr } = await authSupabase
+  const authDb = getAuthDbAdmin();
+  const { data: tenantUsers, error: tenantQueryErr } = await authDb
     .schema('auth_tenant')
     .from('users')
     .select('id')
@@ -369,14 +369,14 @@ async function setPasswordAndComplete(email, password) {
     return { success: false, error: 'This email is associated with multiple accounts. Please contact support.', code: 'DUPLICATE_EMAIL' };
   }
 
-  // 3. Check Supabase Auth (auth.users) — also save the match for reuse
+  // 3. Check the auth store (auth.users) — also save the match for reuse
   let existingAuthUser = null;
   try {
-    const { data: authList } = await supabase.auth.admin.listUsers({ page: 1, perPage: 1000 });
+    const { data: authList } = await db.auth.admin.listUsers({ page: 1, perPage: 1000 });
     if (authList?.users) {
       const authMatches = authList.users.filter(u => u.email?.toLowerCase() === normalizedEmail);
       if (authMatches.length > 1) {
-        console.error('[Signup] Duplicate email in Supabase Auth:', normalizedEmail, 'count:', authMatches.length);
+        console.error('[Signup] Duplicate email in the auth store:', normalizedEmail, 'count:', authMatches.length);
         return { success: false, error: 'This email is associated with multiple accounts. Please contact support.', code: 'DUPLICATE_EMAIL' };
       }
       if (authMatches.length === 1) {
@@ -386,7 +386,7 @@ async function setPasswordAndComplete(email, password) {
     }
   } catch (authCheckErr) {
     // Non-fatal: createUser / updateUserById will catch auth-level duplicates
-    console.warn('[Signup] Supabase Auth duplicate check skipped:', authCheckErr.message);
+    console.warn('[Signup] the auth store duplicate check skipped:', authCheckErr.message);
   }
 
   // 4. Determine user state
@@ -407,7 +407,7 @@ async function setPasswordAndComplete(email, password) {
     const phoneChanged = existingUser.phone_number !== record.phone_number || existingUser.phone_country_code !== record.phone_country_code;
     if (phoneChanged) {
       console.log('[Signup] Updating phone number for:', normalizedEmail);
-      const { error: updateError } = await supabase
+      const { error: updateError } = await db
         .from('users')
         .update({
           phone_number: record.phone_number,
@@ -423,7 +423,7 @@ async function setPasswordAndComplete(email, password) {
       }
     }
 
-    // Update password (and phone if changed) in Supabase Auth
+    // Update password (and phone if changed) in the auth store
     const authUpdateData = {
       password,
       user_metadata: {
@@ -437,16 +437,16 @@ async function setPasswordAndComplete(email, password) {
       authUpdateData.phone_confirm = true;
     }
 
-    const { error: authUpdateError } = await supabase.auth.admin.updateUserById(existingUser.id, authUpdateData);
+    const { error: authUpdateError } = await db.auth.admin.updateUserById(existingUser.id, authUpdateData);
     if (authUpdateError) {
-      console.error('[Signup] Error updating Supabase Auth user:', authUpdateError.message);
+      console.error('[Signup] Error updating the auth store user:', authUpdateError.message);
       return { success: false, error: 'Failed to update password. Please try again.', code: 'AUTH_UPDATE_FAILED' };
     }
 
     // Update auth_tenant.users
     try {
       const bcryptHash = await hashPassword(password);
-      const { error: atUpdateError } = await authSupabase
+      const { error: atUpdateError } = await authDb
         .schema('auth_tenant')
         .from('users')
         .update({
@@ -466,9 +466,9 @@ async function setPasswordAndComplete(email, password) {
     }
 
     // Clean up pending record and OTPs
-    await supabase.from('signup_pending').delete().eq('email', normalizedEmail);
-    await supabase.from('signup_otps').delete().eq('identifier', normalizedEmail);
-    await supabase.from('signup_otps').delete().eq('identifier', fullPhone);
+    await db.from('signup_pending').delete().eq('email', normalizedEmail);
+    await db.from('signup_otps').delete().eq('identifier', normalizedEmail);
+    await db.from('signup_otps').delete().eq('identifier', fullPhone);
 
     return {
       success: true,
@@ -476,8 +476,8 @@ async function setPasswordAndComplete(email, password) {
     };
   }
 
-  // --- CREATE OR UPDATE PATH based on Supabase Auth state ---
-  let supabaseUser;
+  // --- CREATE OR UPDATE PATH based on the auth store state ---
+  let authUser;
 
   if (existingAuthUser) {
     // Auth user already exists (previous incomplete signup) — update instead of create
@@ -485,10 +485,10 @@ async function setPasswordAndComplete(email, password) {
 
     // If phone is owned by a DIFFERENT auth user, clear it first
     try {
-      const { data: authList } = await supabase.auth.admin.listUsers({ page: 1, perPage: 1000 });
+      const { data: authList } = await db.auth.admin.listUsers({ page: 1, perPage: 1000 });
       const phoneOwner = authList?.users?.find(u => phonesMatch(u.phone, fullPhone) && u.id !== existingAuthUser.id);
       if (phoneOwner) {
-        const { data: ownerProfile } = await supabase
+        const { data: ownerProfile } = await db
           .from('users')
           .select('id, active')
           .eq('id', phoneOwner.id)
@@ -498,13 +498,13 @@ async function setPasswordAndComplete(email, password) {
           return { success: false, error: 'Phone number is already in use by another account.', code: 'PHONE_EXISTS' };
         }
         console.log('[Signup] Clearing phone from orphaned auth user:', phoneOwner.id);
-        await supabase.auth.admin.updateUserById(phoneOwner.id, { phone: '+10000000000' });
+        await db.auth.admin.updateUserById(phoneOwner.id, { phone: '+10000000000' });
       }
     } catch (phoneCheckErr) {
       console.warn('[Signup] Phone conflict check skipped:', phoneCheckErr.message);
     }
 
-    const { error: authUpdateErr } = await supabase.auth.admin.updateUserById(existingAuthUser.id, {
+    const { error: authUpdateErr } = await db.auth.admin.updateUserById(existingAuthUser.id, {
       password,
       phone: fullPhone,
       phone_confirm: true,
@@ -520,10 +520,10 @@ async function setPasswordAndComplete(email, password) {
       return { success: false, error: 'Failed to set password. Please try again.', code: 'AUTH_UPDATE_FAILED' };
     }
 
-    supabaseUser = existingAuthUser;
+    authUser = existingAuthUser;
   } else {
     // No auth user exists — create new
-    let { data: authData, error: authError } = await supabase.auth.admin.createUser({
+    let { data: authData, error: authError } = await db.auth.admin.createUser({
       email: normalizedEmail,
       password,
       email_confirm: true,
@@ -540,12 +540,12 @@ async function setPasswordAndComplete(email, password) {
     if (authError && authError.message?.includes('Phone number already registered')) {
       console.log('[Signup] Phone conflict on createUser, checking owner for:', fullPhone);
       try {
-        const { data: authList } = await supabase.auth.admin.listUsers({ page: 1, perPage: 1000 });
+        const { data: authList } = await db.auth.admin.listUsers({ page: 1, perPage: 1000 });
         const allUsers = authList?.users || [];
         const phoneOwner = allUsers.find(u => phonesMatch(u.phone, fullPhone));
 
         if (phoneOwner) {
-          const { data: ownerProfile } = await supabase
+          const { data: ownerProfile } = await db
             .from('users')
             .select('id, active')
             .eq('id', phoneOwner.id)
@@ -557,9 +557,9 @@ async function setPasswordAndComplete(email, password) {
 
           // Orphaned — clear phone and retry
           console.log('[Signup] Clearing phone from orphaned auth user:', phoneOwner.id);
-          await supabase.auth.admin.updateUserById(phoneOwner.id, { phone: '+10000000000' });
+          await db.auth.admin.updateUserById(phoneOwner.id, { phone: '+10000000000' });
 
-          const retry = await supabase.auth.admin.createUser({
+          const retry = await db.auth.admin.createUser({
             email: normalizedEmail,
             password,
             email_confirm: true,
@@ -584,14 +584,14 @@ async function setPasswordAndComplete(email, password) {
       return { success: false, error: authError.message || 'Failed to create user', code: 'AUTH_CREATE_FAILED' };
     }
 
-    supabaseUser = authData.user;
+    authUser = authData.user;
   }
 
   // Create or update user profile in public.users
-  const { error: profileError } = await supabase
+  const { error: profileError } = await db
     .from('users')
     .upsert({
-      id: supabaseUser.id,
+      id: authUser.id,
       email: normalizedEmail,
       full_name: record.full_name,
       phone_number: record.phone_number,
@@ -612,7 +612,7 @@ async function setPasswordAndComplete(email, password) {
     const bcryptHash = await hashPassword(password);
 
     // Upsert into auth_tenant.users
-    const { data: authUser, error: authUserError } = await authSupabase
+    const { data: authUser, error: authUserError } = await authDb
       .schema('auth_tenant')
       .from('users')
       .upsert({
@@ -635,7 +635,7 @@ async function setPasswordAndComplete(email, password) {
       console.error('[Signup] auth_tenant.users insert error:', authUserError.message);
     } else if (authUser) {
       // Link to all QR-enabled tenants
-      const { data: qrTenants } = await authSupabase
+      const { data: qrTenants } = await authDb
         .schema('auth_tenant')
         .from('tenants')
         .select('id')
@@ -653,7 +653,7 @@ async function setPasswordAndComplete(email, password) {
           updated_at: now
         }));
 
-        const { error: tuError } = await authSupabase
+        const { error: tuError } = await authDb
           .schema('auth_tenant')
           .from('tenant_users')
           .insert(tenantUserRows);
@@ -669,9 +669,9 @@ async function setPasswordAndComplete(email, password) {
   }
 
   // Clean up pending record and OTPs
-  await supabase.from('signup_pending').delete().eq('email', normalizedEmail);
-  await supabase.from('signup_otps').delete().eq('identifier', normalizedEmail);
-  await supabase.from('signup_otps').delete().eq('identifier', fullPhone);
+  await db.from('signup_pending').delete().eq('email', normalizedEmail);
+  await db.from('signup_otps').delete().eq('identifier', normalizedEmail);
+  await db.from('signup_otps').delete().eq('identifier', fullPhone);
 
   return {
     success: true,
