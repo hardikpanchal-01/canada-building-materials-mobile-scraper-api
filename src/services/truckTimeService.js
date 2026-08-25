@@ -2,12 +2,12 @@
  * Truck Time Service
  *
  * Validates email sending windows based on truck schedules.
- * Computes first/last truck times directly from the database.
+ * Integrates with the truck times edge function to get first/last truck times.
  */
 
-const { getPool } = require('./database/postgresClient');
-
 // Configuration
+const TRUCK_TIMES_API_URL = process.env.TRUCK_TIMES_API_URL;
+const TRUCK_TIMES_API_KEY = process.env.TRUCK_TIMES_API_KEY;
 const BUSINESS_TIMEZONE = process.env.BUSINESS_TIMEZONE || 'America/Chicago';
 const EMAIL_TIME_WINDOW_ENABLED = process.env.EMAIL_TIME_WINDOW_ENABLED !== 'false';
 const EMAIL_TIME_WINDOW_BUFFER_MINUTES = parseInt(process.env.EMAIL_TIME_WINDOW_BUFFER_MINUTES) || 0;
@@ -50,26 +50,18 @@ function formatTimeInTimezone(date = new Date()) {
 }
 
 /**
- * Compute first/last truck times for a day, directly from the database.
- *
- * This used to call a hosted edge function over HTTP. The same algorithm now
- * runs here against the tenant database:
- *   1. all active schedules for the day, earliest first
- *   2. first schedule sets the estimated first truck time
- *   3. latest start wins; ties broken by most loads (extends furthest)
- *   4. estimated last = start + (loads - 1) * truck_space minutes
- *   5/6. prefer an ACTUAL on_job_time from tickets when one exists
- *
+ * Fetch daily truck times from truck times edge function
  * @param {string} date - Date in YYYY-MM-DD format
  * @returns {Promise<Object>} Truck times response
  */
 async function getDailyTruckTimes(date) {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date || ''))) {
+  if (!TRUCK_TIMES_API_URL || !TRUCK_TIMES_API_KEY) {
+    console.error('Truck times API configuration missing');
     return {
       date,
       first_truck_time: null,
       last_truck_time: null,
-      error: 'Invalid date format. Use YYYY-MM-DD',
+      error: 'Truck times API configuration missing'
     };
   }
 
@@ -79,124 +71,64 @@ async function getDailyTruckTimes(date) {
     return cached.data;
   }
 
-  const empty = {
-    date,
-    first_truck_time: null,
-    first_truck_source: 'estimated',
-    first_truck_order_code: null,
-    last_truck_time: null,
-    last_truck_source: 'estimated',
-    last_truck_order_code: null,
-    last_truck_calculation: null,
-    total_schedules: 0,
-    total_trucks_scheduled: 0,
-  };
-
   try {
-    const pool = getPool();
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
 
-    const { rows: schedules } = await pool.query(
-      `SELECT s.id,
-              s.start_time,
-              s.number_of_loads,
-              s.truck_space,
-              s.plant_code,
-              o.order_code
-         FROM public.order_product_schedules s
-         JOIN public.order_products p ON p.id = s.order_product_id
-         JOIN public.orders o         ON o.order_id = p.order_id
-        WHERE s.start_time >= $1::timestamp
-          AND s.start_time <  $2::timestamp
-          AND COALESCE(o.removed, false) = false
-        ORDER BY s.start_time ASC`,
-      [`${date}T00:00:00`, `${date}T23:59:59`]
+    const response = await fetch(
+      `${TRUCK_TIMES_API_URL}/functions/v1/get-daily-truck-times?date=${date}`,
+      {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${TRUCK_TIMES_API_KEY}`,
+          'apikey': TRUCK_TIMES_API_KEY,
+          'Content-Type': 'application/json',
+        },
+        signal: controller.signal
+      }
     );
 
-    if (!schedules.length) {
-      _truckTimesCache.set(date, { data: empty, timestamp: Date.now() });
-      return empty;
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      throw new Error(`Edge function returned ${response.status}: ${response.statusText}`);
     }
 
-    const first = schedules[0];
-    const firstOrderCode = first.order_code || null;
-    const estimatedFirstTruckTime = first.start_time;
-
-    // Latest start; ties broken by most loads.
-    const latestStart = schedules[schedules.length - 1].start_time;
-    const latest = schedules.filter(
-      (s) => String(s.start_time) === String(latestStart)
-    );
-    const last = latest.reduce((max, s) =>
-      (s.number_of_loads || 0) > (max.number_of_loads || 0) ? s : max
-    );
-    const lastOrderCode = last.order_code || null;
-
-    const loads = last.number_of_loads || 1;
-    const spacing = last.truck_space ?? 0;
-    const estimatedLastTruckTime = new Date(
-      new Date(last.start_time).getTime() + (loads - 1) * spacing * 60 * 1000
-    );
-
-    // Prefer an actual ticket time when one exists.
-    const actualFor = async (orderCode, direction) => {
-      if (!orderCode) return null;
-      const { rows } = await pool.query(
-        `SELECT on_job_time
-           FROM public.tickets
-          WHERE order_code = $1
-            AND active = true
-            AND remove_reason_code IS NULL
-            AND on_job_time IS NOT NULL
-          ORDER BY on_job_time ${direction === 'asc' ? 'ASC' : 'DESC'}
-          LIMIT 1`,
-        [orderCode]
-      );
-      return rows[0]?.on_job_time ?? null;
-    };
-
-    const actualFirst = await actualFor(firstOrderCode, 'asc');
-    const actualLast = await actualFor(lastOrderCode, 'desc');
-
-    const data = {
-      date,
-      first_truck_time: actualFirst ?? estimatedFirstTruckTime,
-      first_truck_source: actualFirst ? 'actual' : 'estimated',
-      first_truck_order_code: firstOrderCode,
-      last_truck_time: actualLast ?? estimatedLastTruckTime.toISOString(),
-      last_truck_source: actualLast ? 'actual' : 'estimated',
-      last_truck_order_code: lastOrderCode,
-      last_truck_calculation: {
-        base_start_time: last.start_time,
-        number_of_loads: loads,
-        truck_space_minutes: spacing,
-      },
-      total_schedules: schedules.length,
-      total_trucks_scheduled: schedules.reduce(
-        (sum, s) => sum + (s.number_of_loads || 0),
-        0
-      ),
-    };
+    const data = await response.json();
 
     console.log(`Truck times for ${date}:`, {
       first: data.first_truck_time,
       last: data.last_truck_time,
-      source: `${data.first_truck_source}/${data.last_truck_source}`,
+      source: `${data.first_truck_source}/${data.last_truck_source}`
     });
 
+    // Cache the result
     _truckTimesCache.set(date, { data, timestamp: Date.now() });
+
     return data;
   } catch (error) {
-    console.error(`Failed to compute truck times for ${date}:`, error.message);
-    // Fail closed - don't send emails if we can't verify the window.
+    // Handle abort error specifically
+    if (error.name === 'AbortError') {
+      console.error(`Truck times API timeout for date ${date}`);
+      return {
+        date,
+        first_truck_time: null,
+        last_truck_time: null,
+        error: 'Request timeout'
+      };
+    }
+
+    console.error(`Failed to fetch truck times for ${date}:`, error.message);
+
+    // Fail closed - don't send emails if we can't verify the window
     return {
       date,
       first_truck_time: null,
       last_truck_time: null,
-      error: error.message,
+      error: error.message
     };
   }
 }
-
 
 /**
  * Check if current time is within the email sending window

@@ -5,7 +5,6 @@
  */
 
 const { executeDirectSQL } = require('../utils/postgresExecutor');
-const { getNotificationDb } = require('../config/notificationDatabase');
 
 /**
  * Build SQL exclusion conditions from exclusion patterns
@@ -329,17 +328,16 @@ function getTimeAgo(dateString) {
  */
 async function getRecentAlerts(userId) {
   try {
-    const db = getNotificationDb();
-    const { data, error } = await db
-      .from('notification_queue')
-      .select('id, subject, body, created_at, status')
-      .eq('user_id', userId)
-      .order('created_at', { ascending: false })
-      .limit(5);
+    const result = await executeDirectSQL(
+      `SELECT id, subject, body, created_at, status
+       FROM notification_queue
+       WHERE user_id = $1
+       ORDER BY created_at DESC
+       LIMIT 5`,
+      [userId]
+    );
 
-    if (error) throw error;
-
-    return (data || []).map(a => ({
+    return (result.data || []).map(a => ({
       id: a.id,
       title: a.subject || '',
       message: a.body || '',
@@ -360,22 +358,20 @@ async function getRecentAlerts(userId) {
  */
 async function getUnreadNotificationCount(userId) {
   try {
-    const db = getNotificationDb();
-    const { count, error } = await db
-      .from('notification_queue')
-      .select('id', { count: 'exact', head: true })
-      .eq('user_id', userId)
-      .neq('status', 'delivered');
-
-    if (error) throw error;
-    return count || 0;
+    const result = await executeDirectSQL(
+      `SELECT count(*)::int AS count
+       FROM notification_queue
+       WHERE user_id = $1 AND status <> $2`,
+      [userId, 'delivered']
+    );
+    return result.data?.[0]?.count || 0;
   } catch (error) {
     return 0;
   }
 }
 
 /**
- * Get recent alerts + unread count in parallel (2 queries to notification the database).
+ * Get recent alerts + unread count in parallel (2 direct SQL queries).
  * Returns { alerts: Array, unreadCount: number }
  */
 async function getAlertsAndUnreadCount(userId) {

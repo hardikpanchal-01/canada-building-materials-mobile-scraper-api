@@ -57,7 +57,7 @@ async function getNewDashboardData(userId, userAccess = null, pagination = {}, d
     }
 
     // Check cache first (include userAccess, pagination, and dates in cache key)
-    const cacheKey = `new_${userId}_${userAccess?.userType || 'default'}_${pagination.page || 1}_${pagination.limit || 10}_${dateFrom}_${dateTo}`;
+    const cacheKey = `new_${userId}_${userAccess?.userType || 'default'}_${pagination.page || 1}_${pagination.limit || 10}_${dateFrom}_${dateTo}_${tz?.iana || 'default'}`;
     const now = Date.now();
     const cached = _dashboardCache.get(cacheKey);
     if (cached && (now - cached.timestamp) < DASHBOARD_CACHE_TTL_MS) {
@@ -65,10 +65,11 @@ async function getNewDashboardData(userId, userAccess = null, pagination = {}, d
     }
 
     // Get user profile and exclusion patterns in parallel.
-    // affects_counts=true subset so dashboard counts align with web summary.
+    // Full active pattern set so dashboard counts match web RPC
+    // get_orders_summary (which ignores affects_counts post-2026-05-11).
     const [userProfile, exclusionPatterns] = await Promise.all([
       getUserProfile(userId, userEmail),
-      fetchExclusionPatterns({ affectsCountsOnly: true })
+      fetchExclusionPatterns()
     ]);
 
     // Execute all queries in parallel (pass userAccess for filtering)

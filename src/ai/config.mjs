@@ -9,7 +9,7 @@
  * AI Assistant keeps working exactly as before.
  */
 
-import { serverDb } from "./_db.mjs";
+import { db } from "./_db.mjs";
 import { decrypt } from "./encryption.mjs";
 import { MODELS, DEFAULT_MODEL_ID } from "./models.mjs";
 
@@ -27,7 +27,7 @@ export function defaultAiConfig() {
 /** Load the singleton config row. Never throws — returns defaults on any error. */
 export async function getAiConfig() {
   try {
-    const { data, error } = await serverDb
+    const { data, error } = await db
       .from("ai_config")
       .select(
         "enabled_model_ids, default_model_id, monthly_token_budget, budget_enforced",
@@ -91,7 +91,7 @@ function envProviderKeys() {
 
 async function readProviderKeyRow() {
   try {
-    const { data, error } = await serverDb
+    const { data, error } = await db
       .from("ai_provider_keys")
       .select(
         "google_api_key, anthropic_api_key, azure_api_key, azure_resource_name, azure_deployment",
@@ -160,7 +160,7 @@ export async function getMonthToDateTokens() {
       Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1),
     ).toISOString();
 
-    const { data, error } = await serverDb
+    const { data, error } = await db
       .from("ai_token_usage")
       .select("total_tokens")
       .gte("created_at", monthStart);
@@ -200,7 +200,7 @@ export async function getTokenBank(
   scopeId = "",
 ) {
   try {
-    const { data, error } = await serverDb
+    const { data, error } = await db
       .from("ai_token_bank")
       .select(
         "scope, scope_id, monthly_allotment, bonus_tokens, enforced, period_start",
@@ -218,7 +218,7 @@ export async function getTokenBank(
     if (storedPeriod && storedPeriod < periodStart) {
       const resetBonus = bonus !== 0;
       bonus = 0;
-      void serverDb
+      void db
         .from("ai_token_bank")
         .update({
           ...(resetBonus ? { bonus_tokens: 0 } : {}),

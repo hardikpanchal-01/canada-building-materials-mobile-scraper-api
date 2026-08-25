@@ -1,6 +1,6 @@
 const orderRequestService = require('../services/orderRequestService');
 const { sendOrderStatusEmail, sendOrderCreatedEmail, sendOrderUpdatedEmail } = require('../services/orderRequestEmailService');
-const { getDbAdmin } = require('../config/database');
+const { executeDirectSQL } = require('../utils/postgresExecutor');
 const { getTenantShowRegionForUser, resolveEffectiveUserId } = require('../middleware/auth');
 
 /**
@@ -106,17 +106,16 @@ async function createOrderRequest(req, res) {
     // Send email notification to creator (non-blocking)
     (async () => {
       try {
-        const db = getDbAdmin();
         const order = await orderRequestService.getOrderRequestById(data.id);
         if (!order) return;
 
         const showRegion = await getTenantShowRegionForUser(userId);
 
-        const { data: creator } = await db
-          .from('users')
-          .select('email, full_name')
-          .eq('id', userId)
-          .single();
+        const creatorResult = await executeDirectSQL(
+          'SELECT email, full_name FROM users WHERE id = $1 LIMIT 1',
+          [userId]
+        );
+        const creator = creatorResult.data[0] || null;
 
         if (creator?.email) {
           await sendOrderCreatedEmail({
@@ -153,7 +152,6 @@ async function updateOrderRequest(req, res) {
     // Send update email notification (non-blocking)
     (async () => {
       try {
-        const db = getDbAdmin();
         const order = await orderRequestService.getOrderRequestById(id);
         if (!order) return;
 
@@ -161,10 +159,11 @@ async function updateOrderRequest(req, res) {
 
         // Collect recipient IDs: updater + original creator (deduplicated)
         const recipientIds = [...new Set([updaterUserId, order.user_id].filter(Boolean))];
-        const { data: users } = await db
-          .from('users')
-          .select('id, email, full_name')
-          .in('id', recipientIds);
+        const usersResult = await executeDirectSQL(
+          'SELECT id, email, full_name FROM users WHERE id = ANY($1)',
+          [recipientIds]
+        );
+        const users = usersResult.data;
 
         if (!users || users.length === 0) return;
 
@@ -210,15 +209,14 @@ async function updateOrderRequestStatus(req, res) {
     if (status === 'approved' || status === 'rejected') {
       (async () => {
         try {
-          const db = getDbAdmin();
           const order = await orderRequestService.getOrderRequestById(id);
           if (!order || !order.user_id) return;
 
-          const { data: creator } = await db
-            .from('users')
-            .select('email, full_name')
-            .eq('id', order.user_id)
-            .single();
+          const creatorResult = await executeDirectSQL(
+            'SELECT email, full_name FROM users WHERE id = $1 LIMIT 1',
+            [order.user_id]
+          );
+          const creator = creatorResult.data[0] || null;
 
           if (creator?.email) {
             await sendOrderStatusEmail({

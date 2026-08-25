@@ -1,4 +1,4 @@
-const { getDbAdmin: getDb } = require('../config/database');
+const { executeDirectSQL } = require('../utils/postgresExecutor');
 
 // Configuration
 const MAX_RETRIES = 3;
@@ -144,22 +144,19 @@ async function registerOrUpdateDevice(userId, deviceInfo) {
     // Use device_token as device_id if not provided
     const deviceId = deviceInfo.device_id || deviceInfo.device_token;
     
-    const db = getDb();
     const now = new Date().toISOString();
-    
+
     // Check if device_token already exists (may have duplicates, so use limit(1))
     const checkDevice = async () => {
-      const { data, error: checkError } = await db
-        .from('user_devices')
-        .select('id, user_id')
-        .eq('device_token', deviceInfo.device_token)
-        .limit(1);
-
-      if (checkError) {
+      try {
+        const result = await executeDirectSQL(
+          'SELECT id, user_id FROM user_devices WHERE device_token = $1 LIMIT 1',
+          [deviceInfo.device_token]
+        );
+        return result.data && result.data.length > 0 ? result.data[0] : null;
+      } catch (checkError) {
         throw new Error(`Error checking device: ${checkError.message}`);
       }
-
-      return data && data.length > 0 ? data[0] : null;
     };
     
     const existingDevice = await retryWithBackoff(checkDevice);
@@ -183,92 +180,102 @@ async function registerOrUpdateDevice(userId, deviceInfo) {
       is_active: true,
       last_active_at: now
     };
-    
+
+    // Shared UPDATE ... RETURNING * for the update-by-token paths
+    const updateDeviceByToken = async (tokenValue) => {
+      const result = await executeDirectSQL(
+        `UPDATE user_devices
+         SET user_id = $1, device_token = $2, device_id = $3, device_type = $4,
+             device_name = $5, device_model = $6, os_version = $7, app_version = $8,
+             is_active = $9, last_active_at = $10
+         WHERE device_token = $11
+         RETURNING *`,
+        [
+          deviceData.user_id, deviceData.device_token, deviceData.device_id,
+          deviceData.device_type, deviceData.device_name, deviceData.device_model,
+          deviceData.os_version, deviceData.app_version, deviceData.is_active,
+          deviceData.last_active_at, tokenValue
+        ]
+      );
+      return result.data && result.data.length > 0 ? result.data[0] : null;
+    };
+
     let result;
-    
+
     if (existingDevice) {
       // Update existing device by device_token (may match multiple rows)
       const updateDevice = async () => {
-        const { data, error } = await db
-          .from('user_devices')
-          .update(deviceData)
-          .eq('device_token', deviceInfo.device_token)
-          .select()
-          .limit(1);
-
-        if (error) {
+        try {
+          return await updateDeviceByToken(deviceInfo.device_token);
+        } catch (error) {
           throw new Error(`Error updating device: ${error.message}`);
         }
-
-        return data && data.length > 0 ? data[0] : null;
       };
-      
+
       result = await retryWithBackoff(updateDevice);
       console.log(`✅ Device updated: ${deviceInfo.device_token.substring(0, 20)}... for user ${userId}`);
     } else {
       // Check device limit before inserting
-      const { data: userDevices, error: countError } = await db
-        .from('user_devices')
-        .select('id', { count: 'exact' })
-        .eq('user_id', userId)
-        .eq('is_active', true);
-      
-      if (!countError && userDevices && userDevices.length >= MAX_DEVICES_PER_USER) {
-        // Deactivate oldest inactive device or oldest active device
-        const { data: oldestDevices } = await db
-          .from('user_devices')
-          .select('id')
-          .eq('user_id', userId)
-          .order('last_active_at', { ascending: true })
-          .limit(1);
+      // (errors in this limit-check path are ignored, matching the original behavior)
+      try {
+        const countResult = await executeDirectSQL(
+          'SELECT count(*)::int AS count FROM user_devices WHERE user_id = $1 AND is_active = true',
+          [userId]
+        );
+        const activeCount = countResult.data && countResult.data.length > 0 ? countResult.data[0].count : 0;
 
-        const oldestDevice = oldestDevices && oldestDevices.length > 0 ? oldestDevices[0] : null;
-        if (oldestDevice) {
-          await db
-            .from('user_devices')
-            .update({ is_active: false })
-            .eq('id', oldestDevice.id);
-          
-          console.log(`⚠️  Device limit reached for user ${userId}, deactivated oldest device`);
+        if (activeCount >= MAX_DEVICES_PER_USER) {
+          // Deactivate oldest inactive device or oldest active device
+          const oldestResult = await executeDirectSQL(
+            'SELECT id FROM user_devices WHERE user_id = $1 ORDER BY last_active_at ASC LIMIT 1',
+            [userId]
+          );
+
+          const oldestDevice = oldestResult.data && oldestResult.data.length > 0 ? oldestResult.data[0] : null;
+          if (oldestDevice) {
+            await executeDirectSQL(
+              'UPDATE user_devices SET is_active = false WHERE id = $1',
+              [oldestDevice.id]
+            );
+
+            console.log(`⚠️  Device limit reached for user ${userId}, deactivated oldest device`);
+          }
         }
+      } catch (limitError) {
+        // Original code ignored errors in the device-limit check
       }
-      
+
       // Insert new device
       const insertDevice = async () => {
-        const insertData = {
-          ...deviceData,
-          created_at: now
-        };
-        
-        const { data, error } = await db
-          .from('user_devices')
-          .insert(insertData)
-          .select()
-          .single();
-        
-        if (error) {
+        try {
+          const insertResult = await executeDirectSQL(
+            `INSERT INTO user_devices
+               (user_id, device_token, device_id, device_type, device_name,
+                device_model, os_version, app_version, is_active, last_active_at, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+             RETURNING *`,
+            [
+              deviceData.user_id, deviceData.device_token, deviceData.device_id,
+              deviceData.device_type, deviceData.device_name, deviceData.device_model,
+              deviceData.os_version, deviceData.app_version, deviceData.is_active,
+              deviceData.last_active_at, now
+            ]
+          );
+          return insertResult.data && insertResult.data.length > 0 ? insertResult.data[0] : null;
+        } catch (error) {
           // Handle duplicate token error gracefully
           if (error.code === '23505' || error.message?.includes('duplicate')) {
             // Token was inserted between check and insert, try update instead
-            const { data: updatedData, error: updateError } = await db
-              .from('user_devices')
-              .update(deviceData)
-              .eq('device_token', deviceInfo.device_token.trim())
-              .select()
-              .limit(1);
-
-            if (updateError) {
+            try {
+              return await updateDeviceByToken(deviceInfo.device_token.trim());
+            } catch (updateError) {
               throw new Error(`Error registering device: ${updateError.message}`);
             }
-
-            return updatedData && updatedData.length > 0 ? updatedData[0] : null;
           }
           throw new Error(`Error registering device: ${error.message}`);
         }
-        
-        return data;
       };
-      
+
       result = await retryWithBackoff(insertDevice);
       console.log(`✅ Device registered: ${deviceInfo.device_token.substring(0, 20)}... for user ${userId}`);
     }
@@ -291,21 +298,16 @@ async function deactivateDeviceToken(deviceToken) {
       throw new Error('device_token is required');
     }
     
-    const db = getDb();
-    
     const deactivate = async () => {
-      const { data, error } = await db
-        .from('user_devices')
-        .update({ is_active: false })
-        .eq('device_token', deviceToken)
-        .select('id')
-        .limit(1);
-
-      if (error) {
+      try {
+        const result = await executeDirectSQL(
+          'UPDATE user_devices SET is_active = false WHERE device_token = $1 RETURNING id',
+          [deviceToken]
+        );
+        return result.data && result.data.length > 0;
+      } catch (error) {
         throw new Error(`Error deactivating device: ${error.message}`);
       }
-
-      return data && data.length > 0;
     };
     
     const success = await retryWithBackoff(deactivate);
@@ -335,17 +337,19 @@ async function deactivateUserDeviceToken(userId, deviceToken) {
       throw new Error('user_id and device_token are required');
     }
     
-    const db = getDb();
-    
     // Verify token belongs to user before deactivating
-    const { data: devices, error: checkError } = await db
-      .from('user_devices')
-      .select('id')
-      .eq('device_token', deviceToken)
-      .eq('user_id', userId)
-      .limit(1);
+    let devices = null;
+    try {
+      const checkResult = await executeDirectSQL(
+        'SELECT id FROM user_devices WHERE device_token = $1 AND user_id = $2 LIMIT 1',
+        [deviceToken, userId]
+      );
+      devices = checkResult.data;
+    } catch (checkError) {
+      devices = null;
+    }
 
-    if (checkError || !devices || devices.length === 0) {
+    if (!devices || devices.length === 0) {
       throw new Error('Device token not found or does not belong to user');
     }
     
@@ -367,21 +371,16 @@ async function deactivateAllUserDevices(userId) {
       throw new Error('user_id is required');
     }
     
-    const db = getDb();
-    
     const deactivate = async () => {
-      const { data, error } = await db
-        .from('user_devices')
-        .update({ is_active: false })
-        .eq('user_id', userId)
-        .eq('is_active', true)
-        .select('id');
-      
-      if (error) {
+      try {
+        const result = await executeDirectSQL(
+          'UPDATE user_devices SET is_active = false WHERE user_id = $1 AND is_active = true RETURNING id',
+          [userId]
+        );
+        return result.data?.length || 0;
+      } catch (error) {
         throw new Error(`Error deactivating devices: ${error.message}`);
       }
-      
-      return data?.length || 0;
     };
     
     const count = await retryWithBackoff(deactivate);
@@ -421,21 +420,16 @@ async function getUserDevices(userId) {
       throw new Error('user_id is required');
     }
     
-    const db = getDb();
-    
     const fetchDevices = async () => {
-      const { data, error } = await db
-        .from('user_devices')
-        .select('*')
-        .eq('user_id', userId)
-        .eq('is_active', true)
-        .order('last_active_at', { ascending: false });
-      
-      if (error) {
+      try {
+        const result = await executeDirectSQL(
+          'SELECT * FROM user_devices WHERE user_id = $1 AND is_active = true ORDER BY last_active_at DESC',
+          [userId]
+        );
+        return result.data || [];
+      } catch (error) {
         throw new Error(`Error fetching devices: ${error.message}`);
       }
-      
-      return data || [];
     };
     
     return await retryWithBackoff(fetchDevices);
@@ -446,14 +440,30 @@ async function getUserDevices(userId) {
 }
 
 /**
- * Get device tokens for a user (for push notifications)
- * @param {string} userId - User ID
- * @returns {Promise<Array<string>>} Array of device tokens
+ * Get device tokens for a user (for push notifications).
+ *
+ * Returns AT MOST ONE token — the most recently active one. Multiple
+ * rows for the same physical phone accumulate in user_devices over
+ * time (FCM token refresh, app reinstall, tenant-switch re-registering
+ * the token, occasionally a stamped device_type that doesn't match the
+ * physical platform). Without this collapse, push fans out to every
+ * surviving row and Firebase delivers each one to whichever installation
+ * the token actually routes to — multiple of which can be the same
+ * physical phone — so the user sees N banners for one logical message.
+ *
+ * Trade-off: a user who genuinely runs the app on two devices (e.g. an
+ * Android phone *and* an iPhone for the same account) will only get the
+ * push on the most-recently-active one. Accepted: that pattern is rare
+ * compared to the common stale-token bug and is recoverable by the
+ * unused device coming back online (which bumps last_active_at).
  */
 async function getUserDeviceTokens(userId) {
   try {
     const devices = await getUserDevices(userId);
-    return devices.map(device => device.device_token).filter(token => token);
+    for (const device of devices) {
+      if (device.device_token) return [device.device_token];
+    }
+    return [];
   } catch (error) {
     throw error;
   }
@@ -469,34 +479,41 @@ async function batchGetUserDeviceTokens(userIds) {
     if (!Array.isArray(userIds) || userIds.length === 0) {
       return {};
     }
-    
-    const db = getDb();
-    
-    const { data, error } = await db
-      .from('user_devices')
-      .select('user_id, device_token')
-      .in('user_id', userIds)
-      .eq('is_active', true);
-    
-    if (error) {
+
+    let data;
+    try {
+      const result = await executeDirectSQL(
+        `SELECT user_id, device_token, device_type, last_active_at
+         FROM user_devices
+         WHERE user_id = ANY($1) AND is_active = true
+         ORDER BY last_active_at DESC`,
+        [userIds]
+      );
+      data = result.data;
+    } catch (error) {
       throw new Error(`Error batch fetching device tokens: ${error.message}`);
     }
-    
-    // Group by user_id
+
+    // Collapse to at most one token per user (most recently active).
+    // See getUserDeviceTokens for the rationale — keeps push fan-out
+    // from hitting stale tokens that still resolve to the same physical
+    // phone (which can happen even across rows stamped with a different
+    // device_type if the column was set incorrectly during an old test
+    // install or workspace switch).
+    const seenUser = new Set();
     const result = {};
-    userIds.forEach(userId => {
+    userIds.forEach((userId) => {
       result[userId] = [];
     });
-    
-    (data || []).forEach(device => {
-      if (device.device_token) {
-        if (!result[device.user_id]) {
-          result[device.user_id] = [];
-        }
-        result[device.user_id].push(device.device_token);
-      }
+
+    (data || []).forEach((device) => {
+      if (!device.device_token) return;
+      if (seenUser.has(device.user_id)) return;
+      seenUser.add(device.user_id);
+      if (!result[device.user_id]) result[device.user_id] = [];
+      result[device.user_id].push(device.device_token);
     });
-    
+
     return result;
   } catch (error) {
     console.error('❌ Error batch fetching device tokens:', error.message);
@@ -515,28 +532,23 @@ async function batchDeactivateTokens(deviceTokens) {
       return 0;
     }
     
-    const db = getDb();
-    
     // Process in batches of 100 to avoid query size limits
     const batchSize = 100;
     let totalDeactivated = 0;
-    
+
     for (let i = 0; i < deviceTokens.length; i += batchSize) {
       const batch = deviceTokens.slice(i, i + batchSize);
-      
+
       const deactivate = async () => {
-        const { data, error } = await db
-          .from('user_devices')
-          .update({ is_active: false })
-          .in('device_token', batch)
-          .eq('is_active', true)
-          .select('id');
-        
-        if (error) {
+        try {
+          const result = await executeDirectSQL(
+            'UPDATE user_devices SET is_active = false WHERE device_token = ANY($1) AND is_active = true RETURNING id',
+            [batch]
+          );
+          return result.data?.length || 0;
+        } catch (error) {
           throw new Error(`Error batch deactivating tokens: ${error.message}`);
         }
-        
-        return data?.length || 0;
       };
       
       const count = await retryWithBackoff(deactivate);
@@ -558,7 +570,6 @@ async function batchDeactivateTokens(deviceTokens) {
  */
 async function cleanupInactiveTokens(daysOld = TOKEN_CLEANUP_DAYS) {
   try {
-    const db = getDb();
     const cutoffDate = new Date();
     cutoffDate.setDate(cutoffDate.getDate() - daysOld);
     const cutoffISO = cutoffDate.toISOString();
@@ -573,34 +584,34 @@ async function cleanupInactiveTokens(daysOld = TOKEN_CLEANUP_DAYS) {
     while (hasMore) {
       const cleanup = async () => {
         // First, get IDs of tokens to delete
-        const { data: tokensToDelete, error: selectError } = await db
-          .from('user_devices')
-          .select('id')
-          .eq('is_active', false)
-          .lt('last_active_at', cutoffISO)
-          .limit(batchSize);
-        
-        if (selectError) {
+        let tokensToDelete;
+        try {
+          const selectResult = await executeDirectSQL(
+            'SELECT id FROM user_devices WHERE is_active = false AND last_active_at < $1 LIMIT $2',
+            [cutoffISO, batchSize]
+          );
+          tokensToDelete = selectResult.data;
+        } catch (selectError) {
           throw new Error(`Error selecting tokens for cleanup: ${selectError.message}`);
         }
-        
+
         if (!tokensToDelete || tokensToDelete.length === 0) {
           hasMore = false;
           return 0;
         }
-        
+
         const ids = tokensToDelete.map(t => t.id);
-        
+
         // Delete the tokens
-        const { error: deleteError } = await db
-          .from('user_devices')
-          .delete()
-          .in('id', ids);
-        
-        if (deleteError) {
+        try {
+          await executeDirectSQL(
+            'DELETE FROM user_devices WHERE id = ANY($1)',
+            [ids]
+          );
+        } catch (deleteError) {
           throw new Error(`Error deleting tokens: ${deleteError.message}`);
         }
-        
+
         return ids.length;
       };
       

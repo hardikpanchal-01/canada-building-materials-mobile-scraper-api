@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { getDbAdmin } = require('../config/database');
+const { executeDirectSQL } = require('../utils/postgresExecutor');
 
 /**
  * Get the current timezone abbreviation (handles DST automatically).
@@ -86,14 +86,17 @@ function getCurrentDateTime(ianaCode, now) {
  */
 router.get('/', async (req, res) => {
   try {
-    const db = getDbAdmin();
-    const { data, error } = await db
-      .from('timezones')
-      .select('id, iana_code, display_name, abbreviation, utc_offset, dst_offset')
-      .eq('is_active', true)
-      .order('sort_order', { ascending: true });
-
-    if (error) {
+    let data;
+    try {
+      const result = await executeDirectSQL(
+        `SELECT id, iana_code, display_name, abbreviation, utc_offset, dst_offset
+         FROM timezones
+         WHERE is_active = true
+         ORDER BY sort_order ASC`,
+        []
+      );
+      data = result.data;
+    } catch (error) {
       console.error('[Timezones] DB error:', error.message);
       return res.status(500).json({
         success: false,

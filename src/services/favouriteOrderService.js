@@ -16,17 +16,15 @@ const { executeDirectSQL } = require('../utils/postgresExecutor');
  * @returns {object} { is_favourite: boolean, message: string }
  */
 async function toggleFavourite(userId, orderId) {
-  // orders.order_id is a varchar UUID in this tenant's DB, so order_id is text
-  // (not a bigint). Validate it's a non-empty value and compare as text.
-  const orderIdStr = String(orderId ?? '').trim();
-  if (!orderIdStr) {
-    throw new Error('Invalid order_id: must be a non-empty value');
+  const orderIdNum = parseInt(orderId, 10);
+  if (isNaN(orderIdNum)) {
+    throw new Error('Invalid order_id: must be a number');
   }
 
   // Try to delete first — if it existed, we unfavourited it (1 query instead of 2)
   const deleteResult = await executeDirectSQL(
-    `DELETE FROM user_favourite_orders WHERE user_id = $1 AND order_id = $2 RETURNING id`,
-    [userId, orderIdStr]
+    `DELETE FROM user_favourite_orders WHERE user_id = $1 AND order_id = $2::bigint RETURNING id`,
+    [userId, orderIdNum]
   );
 
   if (deleteResult.data.length > 0) {
@@ -38,9 +36,9 @@ async function toggleFavourite(userId, orderId) {
 
   // Did not exist — add it (with ON CONFLICT for race-condition safety)
   await executeDirectSQL(
-    `INSERT INTO user_favourite_orders (user_id, order_id) VALUES ($1, $2)
+    `INSERT INTO user_favourite_orders (user_id, order_id) VALUES ($1, $2::bigint)
      ON CONFLICT (user_id, order_id) DO NOTHING`,
-    [userId, orderIdStr]
+    [userId, orderIdNum]
   );
 
   return {
@@ -183,7 +181,7 @@ async function getFavouriteOrderIds(userId) {
     [userId]
   );
 
-  return new Set(result.data.map(row => row.order_id));
+  return new Set(result.data.map(row => Number(row.order_id)));
 }
 
 module.exports = {

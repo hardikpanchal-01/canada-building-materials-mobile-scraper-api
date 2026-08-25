@@ -6,7 +6,7 @@
  */
 
 const nodemailer = require('nodemailer');
-const { getDbAdmin } = require('../config/database');
+const { executeDirectSQL } = require('../utils/postgresExecutor');
 
 // --- SMTP Config ---
 function createTransporter() {
@@ -102,7 +102,7 @@ function computeTruckRate(spacing) {
 }
 
 function getOrderUrl(orderId) {
-  const baseUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://sws.truckast.ai';
+  const baseUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://dolese.truckast.ai';
   return `${baseUrl}/order-request/${orderId}`;
 }
 
@@ -110,17 +110,11 @@ function getOrderUrl(orderId) {
 
 async function getEmailTemplateByKey(templateKey) {
   try {
-    const db = getDbAdmin();
-    const { data, error } = await db
-      .from('email_templates')
-      .select('*')
-      .eq('template_key', templateKey)
-      .eq('is_active', true)
-      .limit(1)
-      .single();
-
-    if (error || !data) return null;
-    return data;
+    const result = await executeDirectSQL(
+      `SELECT * FROM email_templates WHERE template_key = $1 AND is_active = true LIMIT 1`,
+      [templateKey]
+    );
+    return result.data[0] || null;
   } catch {
     return null;
   }

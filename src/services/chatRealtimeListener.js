@@ -1,68 +1,86 @@
 /**
- * Chat realtime listener
+ * Chat message push listener (PostgreSQL polling)
  *
- * Subscribes to `public.chat_messages` INSERT events on every distinct tenant
- * the database project, then fans out FCM via chatService.notifyChatMessage.
+ * Polls `chat_messages` and `order_entity_messages` for new rows whose
+ * `push_sent_at` is NULL, atomically claims them (first instance to flip
+ * push_sent_at from NULL wins), then fans out FCM via chatService.
  *
- * Tenants are configured by env in TENANT_DB_CONFIGS (JSON array). The shared
- * DATABASE_URL/DATABASE_URL pair is auto-included as a fallback so
- * single-project deployments work with no extra config.
+ * This replaces the previous realtime websocket listener with a
+ * direct-PostgreSQL implementation. The claim is race-safe across multiple
+ * backend instances because the UPDATE ... WHERE push_sent_at IS NULL
+ * RETURNING statement only succeeds on one instance per row.
  *
- * Example TENANT_DB_CONFIGS value:
- *   [
- *     {"label":"shared","url":"https://lwplbyltqsfmfvsgmrjq.the database.co","service_key":"...","subdomains":["dolese","hercules","preferredmaterials","sws"]},
- *     {"label":"concretesupply","url":"https://dqyhmnqrudybmkewwbku.the database.co","service_key":"...","subdomains":["concretesupply"]},
- *     {"label":"delta","url":"https://etsemwbkyzwfhfktkndy.the database.co","service_key":"...","subdomains":["delta"]},
- *     {"label":"sunrise","url":"https://ibziwfnjfwizjazfxntv.the database.co","service_key":"...","subdomains":["sunrise"]}
- *   ]
- *
- * The "subdomains" field is informational only — the listener does not need
- * to resolve a per-message subdomain since the mobile tenant-switch is opt-in.
+ * Env:
+ *   CHAT_REALTIME_DISABLED=true       — kill switch, listener will not start
+ *   CHAT_POLL_INTERVAL_MS=5000        — polling interval (default 5s)
+ *   CHAT_POLL_LOOKBACK_MINUTES=10     — ignore unclaimed rows older than this
+ *                                       (prevents blasting old backlog after deploy)
  */
 
-const pg = require('pg');
-const { getDb } = require('../config/database.js');
 const chatService = require('./chatService');
+const { executeDirectSQL } = require('../utils/postgresExecutor');
 
-const channels = [];
-const clients = [];
+const POLL_INTERVAL_MS = parseInt(process.env.CHAT_POLL_INTERVAL_MS, 10) || 5000;
+const LOOKBACK_MINUTES = parseInt(process.env.CHAT_POLL_LOOKBACK_MINUTES, 10) || 10;
 
-function loadTenantConfigs() {
-  const configs = [];
+let pollTimer = null;
+let polling = false;
 
-  if (process.env.TENANT_DB_CONFIGS) {
-    try {
-      const parsed = JSON.parse(process.env.TENANT_DB_CONFIGS);
-      if (Array.isArray(parsed)) {
-        for (const entry of parsed) {
-          if (entry && entry.url && entry.service_key) {
-            configs.push({
-              label: entry.label || entry.url,
-              url: entry.url,
-              service_key: entry.service_key,
-              subdomains: Array.isArray(entry.subdomains) ? entry.subdomains : [],
-            });
-          }
-        }
-      }
-    } catch (err) {
-      console.error('[ChatRealtime] TENANT_DB_CONFIGS parse error:', err.message);
-    }
+// ─── Cross-instance deduplication ───────────────────────────────────
+// The push_sent_at claim is already atomic, but the dedup table adds a
+// second layer of protection (and preserves the audit trail the previous
+// implementation kept in chat_notification_dedup).
+// ────────────────────────────────────────────────────────────────────
+
+const localDedup = new Map(); // messageId -> timestamp
+const LOCAL_DEDUP_TTL_MS = 120_000; // 2 minutes
+
+function cleanLocalDedup() {
+  const now = Date.now();
+  for (const [key, ts] of localDedup) {
+    if (now - ts > LOCAL_DEDUP_TTL_MS) localDedup.delete(key);
   }
+}
 
-  // Auto-include the primary DATABASE_URL if not already present
-  if (process.env.DATABASE_URL) {
-    const exists = configs.find((c) => c.connectionString === process.env.DATABASE_URL);
-    if (!exists) {
-      configs.push({
-        label: 'primary',
-        connectionString: process.env.DATABASE_URL,
-        subdomains: [],
-      });
+/**
+ * Try to claim a message for notification processing.
+ * Returns true if THIS instance should send the push, false if another
+ * instance already handled it.
+ */
+async function claimMessage(tableName, messageId) {
+  const dedupKey = `${tableName}:${messageId}`;
+
+  // Local dedup first (cheap, covers same-process duplicates)
+  cleanLocalDedup();
+  if (localDedup.has(dedupKey)) return false;
+  localDedup.set(dedupKey, Date.now());
+
+  // DB-based dedup (covers cross-instance duplicates)
+  try {
+    const result = await executeDirectSQL(
+      `INSERT INTO chat_notification_dedup (table_name, message_id, processed_at)
+       VALUES ($1, $2, NOW())
+       ON CONFLICT (table_name, message_id) DO NOTHING
+       RETURNING id`,
+      [tableName, messageId]
+    );
+
+    if (result.data.length === 0) {
+      // Another instance already claimed it
+      localDedup.delete(dedupKey); // keep local cache consistent
+      return false;
     }
-  }
 
-  return configs;
+    return true; // We claimed it
+  } catch (err) {
+    // 42P01 = table doesn't exist yet → fall through to local-only dedup
+    if (err.code === '42P01') {
+      console.warn('[ChatRealtime] chat_notification_dedup table not found — using local dedup only. Run the migration to enable cross-instance dedup.');
+      return true;
+    }
+    console.error('[ChatRealtime] dedup error:', err.message);
+    return true; // Fail open — send rather than silently drop
+  }
 }
 
 function buildPreview(text, attachments) {
@@ -75,59 +93,67 @@ function buildPreview(text, attachments) {
   return '';
 }
 
-async function fetchActiveRecipients(db, senderId) {
-  const { data, error } = await db
-    .from('users')
-    .select('id')
-    .eq('active', true);
-
-  if (error) {
-    console.error(
-      '[ChatRealtime] failed to load recipients:',
-      error.message,
+async function fetchActiveRecipients(senderId) {
+  try {
+    const result = await executeDirectSQL(
+      'SELECT id FROM users WHERE active = true',
+      []
     );
+    return result.data
+      .map((u) => u.id)
+      .filter((id) => id && id !== senderId);
+  } catch (error) {
+    console.error('[ChatRealtime] failed to load recipients:', error.message);
     return [];
   }
-
-  return (data || [])
-    .map((u) => u.id)
-    .filter((id) => id && id !== senderId);
 }
 
-async function fetchOrderMeta(db, orderId) {
-  const { data, error } = await db
-    .from('orders')
-    .select('order_id, order_code, order_date, customer_name')
-    .eq('order_id', orderId)
-    .maybeSingle();
-
-  if (error) {
-    console.error(
-      '[ChatRealtime] failed to load order meta:',
-      error.message,
+async function fetchOrderMeta(orderId) {
+  try {
+    const result = await executeDirectSQL(
+      'SELECT order_id, order_code, order_date, customer_name FROM orders WHERE order_id = $1 LIMIT 1',
+      [orderId]
     );
+    return result.data[0] || null;
+  } catch (error) {
+    console.error('[ChatRealtime] failed to load order meta:', error.message);
     return null;
   }
-  return data || null;
 }
 
-async function handleInsert(config, payload) {
-  const row = payload?.new;
+async function fetchOrderEntityMeta(orderEntityId) {
+  try {
+    const result = await executeDirectSQL(
+      'SELECT id, job_name, company_name, on_job_date::text FROM order_entities WHERE id = $1 LIMIT 1',
+      [orderEntityId]
+    );
+    return result.data[0] || null;
+  } catch (error) {
+    console.error('[ChatRealtime] failed to load order_entity meta:', error.message);
+    return null;
+  }
+}
+
+async function handleChatMessage(row) {
   if (!row) return;
   if (row.is_deleted === true) return;
-  if (!row.sender_id || !row.order_id) return;
+  if (!row.sender_id || !row.order_id || !row.id) return;
+
+  // Dedup: only the first instance to claim this message sends FCM
+  const claimed = await claimMessage('chat_messages', row.id);
+  if (!claimed) {
+    return;
+  }
 
   try {
-    const db = getDb();
-
     const [recipients, orderMeta] = await Promise.all([
-      fetchActiveRecipients(db, row.sender_id),
-      fetchOrderMeta(db, row.order_id),
+      fetchActiveRecipients(row.sender_id),
+      fetchOrderMeta(row.order_id),
     ]);
 
     if (recipients.length === 0) {
       console.log(
-        `[ChatRealtime][${config.label}] order=${row.order_id} sender=${row.sender_id} -> no recipients`,
+        `[ChatRealtime] order=${row.order_id} sender=${row.sender_id} -> no recipients`,
       );
       return;
     }
@@ -135,78 +161,57 @@ async function handleInsert(config, payload) {
     const orderCode = orderMeta?.order_code || String(row.order_id);
 
     const result = await chatService.notifyChatMessage({
+      message_id: row.id,
       order_id: row.order_id,
       order_code: orderCode,
       chat_id: row.chat_id,
       sender_id: row.sender_id,
       sender_name: row.sender_name || '',
       message_preview: buildPreview(row.message_text, row.attachments),
-      tenant_subdomain:
-        config.subdomains && config.subdomains.length === 1
-          ? config.subdomains[0]
-          : '',
+      tenant_subdomain: process.env.CONCRETEGO_SLUG || '',
       recipient_user_ids: recipients,
       order_date: orderMeta?.order_date || '',
       customer_name: orderMeta?.customer_name || '',
     });
 
     console.log(
-      `[ChatRealtime][${config.label}] order=${orderCode} (id=${row.order_id}) -> ${result.successCount}/${result.tokenCount || 0} pushed (failures: ${result.failureCount}, recipients: ${result.recipientCount}, skipped: ${result.skipped || 'no'})`,
+      `[ChatRealtime] order=${orderCode} (id=${row.order_id}) -> ${result.successCount}/${result.tokenCount || 0} pushed (failures: ${result.failureCount}, recipients: ${result.recipientCount}, skipped: ${result.skipped || 'no'})`,
     );
   } catch (err) {
-    console.error(
-      `[ChatRealtime][${config.label}] handler error:`,
-      err.message,
-    );
+    console.error('[ChatRealtime] handler error:', err.message);
   }
 }
 
-async function fetchOrderEntityMeta(db, orderEntityId) {
-  const { data, error } = await db
-    .from('order_entities')
-    .select('id, job_name, company_name, on_job_date')
-    .eq('id', orderEntityId)
-    .maybeSingle();
-
-  if (error) {
-    console.error(
-      '[ChatRealtime] failed to load order_entity meta:',
-      error.message,
-    );
-    return null;
-  }
-  return data || null;
-}
-
-async function handleOrderEntityInsert(config, payload) {
-  const row = payload?.new;
+async function handleOrderEntityMessage(row) {
   if (!row) return;
-  if (!row.sender_id || !row.order_entity_id) return;
+  if (!row.sender_id || !row.order_entity_id || !row.id) return;
+
+  // Dedup: only the first instance to claim this message sends FCM
+  const claimed = await claimMessage('order_entity_messages', row.id);
+  if (!claimed) {
+    return;
+  }
 
   try {
-    const db = getDb();
-
     const [recipients, meta] = await Promise.all([
-      fetchActiveRecipients(db, row.sender_id),
-      fetchOrderEntityMeta(db, row.order_entity_id),
+      fetchActiveRecipients(row.sender_id),
+      fetchOrderEntityMeta(row.order_entity_id),
     ]);
 
     if (recipients.length === 0) {
       console.log(
-        `[ChatRealtime][${config.label}] order_entity=${row.order_entity_id} sender=${row.sender_id} -> no recipients`,
+        `[ChatRealtime] order_entity=${row.order_entity_id} sender=${row.sender_id} -> no recipients`,
       );
       return;
     }
 
     const result = await chatService.notifyOrderEntityMessage({
+      message_id: row.id,
       order_entity_id: row.order_entity_id,
       sender_id: row.sender_id,
       sender_name: row.sender_name || '',
       message_preview: buildPreview(row.message_text, null),
-      tenant_subdomain:
-        config.subdomains && config.subdomains.length === 1
-          ? config.subdomains[0]
-          : '',
+      tenant_subdomain: process.env.CONCRETEGO_SLUG || '',
       recipient_user_ids: recipients,
       job_name: meta?.job_name || '',
       company_name: meta?.company_name || '',
@@ -214,79 +219,59 @@ async function handleOrderEntityInsert(config, payload) {
     });
 
     console.log(
-      `[ChatRealtime][${config.label}] order_request=${row.order_entity_id} -> ${result.successCount}/${result.tokenCount || 0} pushed (failures: ${result.failureCount}, recipients: ${result.recipientCount}, skipped: ${result.skipped || 'no'})`,
+      `[ChatRealtime] order_request=${row.order_entity_id} -> ${result.successCount}/${result.tokenCount || 0} pushed (failures: ${result.failureCount}, recipients: ${result.recipientCount}, skipped: ${result.skipped || 'no'})`,
     );
   } catch (err) {
-    console.error(
-      `[ChatRealtime][${config.label}] order entity handler error:`,
-      err.message,
-    );
+    console.error('[ChatRealtime] order entity handler error:', err.message);
   }
 }
 
-function subscribeOne(config) {
-  // Transport: a dedicated Postgres LISTEN connection.
-  //
-  // This used to open a hosted realtime websocket per tenant project. Realtime
-  // now arrives as LISTEN/NOTIFY on the `realtime_changes` channel, which a
-  // trigger publishes to.
-  //
-  // NOTE: the trigger currently covers only some tables. Until one exists for
-  // `chat_messages` and `order_entity_messages`, this connection stays open but
-  // receives nothing — the same practical state as before, since the listener is
-  // disabled by CHAT_REALTIME_DISABLED. Adding the trigger switches it on with
-  // no code change here.
-  const connectionString =
-    config.connectionString || process.env.DATABASE_URL;
-  if (!connectionString) {
-    console.warn(
-      `[ChatRealtime][${config.label}] no DATABASE_URL — listener not started`,
+/**
+ * One poll cycle: atomically claim unpushed rows (push_sent_at IS NULL) in
+ * both chat tables and fan out FCM for each claimed row.
+ *
+ * The lookback window prevents pushing an old backlog when the listener
+ * starts for the first time (rows that predate the deployment stay unclaimed
+ * until they age out of the window and are then ignored forever).
+ */
+async function pollOnce() {
+  if (polling) return; // don't overlap slow cycles
+  polling = true;
+
+  try {
+    // Order chat (chat_messages → orders)
+    const chatResult = await executeDirectSQL(
+      `UPDATE chat_messages
+       SET push_sent_at = NOW()
+       WHERE push_sent_at IS NULL
+         AND created_at > NOW() - ($1 || ' minutes')::interval
+         AND is_deleted IS NOT TRUE
+       RETURNING *`,
+      [String(LOOKBACK_MINUTES)]
     );
-    return;
-  }
 
-  const client = new pg.Client({
-    connectionString,
-    ssl:
-      process.env.DATABASE_SSL === 'false' ? false : { rejectUnauthorized: false },
-  });
-  clients.push(client);
-
-  const WATCHED = {
-    chat_messages: (payload) => handleInsert(config, payload),
-    order_entity_messages: (payload) => handleOrderEntityInsert(config, payload),
-  };
-
-  client
-    .connect()
-    .then(() => client.query("LISTEN realtime_changes"))
-    .then(() => {
-      console.log(`[ChatRealtime][${config.label}] listening on realtime_changes`);
-    })
-    .catch((err) => {
-      console.error(
-        `[ChatRealtime][${config.label}] LISTEN failed:`,
-        err.message,
-      );
-    });
-
-  client.on('notification', (msg) => {
-    let event;
-    try {
-      event = JSON.parse(msg.payload);
-    } catch {
-      return;
+    for (const row of chatResult.data) {
+      await handleChatMessage(row);
     }
-    if (event.type !== 'INSERT') return;
-    const handler = WATCHED[event.table];
-    if (!handler) return;
-    // Match the payload shape the handlers already expect.
-    handler({ new: event.new, old: event.old });
-  });
 
-  client.on('error', (err) => {
-    console.error(`[ChatRealtime][${config.label}] connection error:`, err.message);
-  });
+    // Order Request chat (order_entity_messages → order_entities)
+    const reqResult = await executeDirectSQL(
+      `UPDATE order_entity_messages
+       SET push_sent_at = NOW()
+       WHERE push_sent_at IS NULL
+         AND created_at > NOW() - ($1 || ' minutes')::interval
+       RETURNING *`,
+      [String(LOOKBACK_MINUTES)]
+    );
+
+    for (const row of reqResult.data) {
+      await handleOrderEntityMessage(row);
+    }
+  } catch (err) {
+    console.error('[ChatRealtime] poll error:', err.message);
+  } finally {
+    polling = false;
+  }
 }
 
 function startChatRealtimeListener() {
@@ -303,62 +288,28 @@ function startChatRealtimeListener() {
     return;
   }
 
-  let configs = loadTenantConfigs();
-  if (configs.length === 0) {
-    console.warn(
-      '[ChatRealtime] no database configs found — listener disabled',
-    );
-    return;
-  }
-
-  // Per-project disable — comma-separated list of labels (e.g. "primary,sunrise")
-  // matching the `label` field in TENANT_DB_CONFIGS (auto-included primary uses
-  // label "primary"). Use this when one tenant's prod backend already fires FCM
-  // (so local should skip it) but other tenants' prod is down (local must fire).
-  const disabledRaw = process.env.CHAT_REALTIME_DISABLED_PROJECTS;
-  if (disabledRaw) {
-    const disabledLabels = new Set(
-      disabledRaw
-        .split(',')
-        .map((s) => s.trim())
-        .filter(Boolean),
-    );
-    const before = configs.length;
-    configs = configs.filter((c) => !disabledLabels.has(c.label));
-    const skipped = before - configs.length;
-    if (skipped > 0) {
-      console.log(
-        `[ChatRealtime] CHAT_REALTIME_DISABLED_PROJECTS skipped ${skipped} project(s): ${[...disabledLabels].join(', ')}`,
-      );
-    }
-  }
-
-  if (configs.length === 0) {
-    console.warn(
-      '[ChatRealtime] all configured projects are disabled — listener will not start',
-    );
+  if (!process.env.DATABASE_URL && !process.env.DB_POOL_URL) {
+    console.warn('[ChatRealtime] DATABASE_URL not configured — listener disabled');
     return;
   }
 
   console.log(
-    `[ChatRealtime] starting listener for ${configs.length} tenant database(s)`,
+    `[ChatRealtime] starting PostgreSQL polling listener (interval=${POLL_INTERVAL_MS}ms, lookback=${LOOKBACK_MINUTES}min)`,
   );
-  for (const cfg of configs) {
-    subscribeOne(cfg);
-  }
+
+  pollTimer = setInterval(pollOnce, POLL_INTERVAL_MS);
+  if (pollTimer.unref) pollTimer.unref();
+
+  // Run one cycle immediately so messages aren't delayed by a full interval
+  pollOnce();
 }
 
 async function stopChatRealtimeListener() {
   console.log('[ChatRealtime] stopping listener…');
-  await Promise.allSettled(
-    clients.map((c) =>
-      c.end().catch((err) =>
-        console.error('[ChatRealtime] disconnect error:', err.message),
-      ),
-    ),
-  );
-  channels.length = 0;
-  clients.length = 0;
+  if (pollTimer) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
 }
 
 module.exports = {

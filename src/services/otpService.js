@@ -1,13 +1,13 @@
 /**
  * OTP Service
  *
- * Handles OTP generation, storage (in the database), email sending (SMTP/nodemailer),
+ * Handles OTP generation, storage (in PostgreSQL), email sending (SMTP/nodemailer),
  * and phone sending (Twilio). Includes expiry, retry limits, and cooldown logic.
  */
 
 const crypto = require('crypto');
 const nodemailer = require('nodemailer');
-const { getDbAdmin } = require('../config/database');
+const { executeDirectSQL } = require('../utils/postgresExecutor');
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -80,7 +80,7 @@ function hashOtp(otp) {
 }
 
 // ---------------------------------------------------------------------------
-// the database OTP table helpers
+// OTP table helpers
 // Table: signup_otps (auto-created via migration or manually)
 //   id (uuid, pk), identifier (text), type (text: 'email'|'phone'),
 //   otp_hash (text), expires_at (timestamptz), attempts (int default 0),
@@ -94,19 +94,16 @@ function hashOtp(otp) {
  * @returns {{ allowed: boolean, waitSeconds?: number, error?: string }}
  */
 async function checkSendLimits(identifier, type) {
-  const db = getDbAdmin();
-
   // Get most recent OTP for this identifier+type
-  const { data: recent } = await db
-    .from('signup_otps')
-    .select('created_at')
-    .eq('identifier', identifier)
-    .eq('type', type)
-    .order('created_at', { ascending: false })
-    .limit(1);
+  const recentResult = await executeDirectSQL(
+    `SELECT created_at FROM signup_otps
+     WHERE identifier = $1 AND type = $2
+     ORDER BY created_at DESC LIMIT 1`,
+    [identifier, type]
+  );
 
-  if (recent && recent.length > 0) {
-    const lastSentAt = new Date(recent[0].created_at);
+  if (recentResult.data.length > 0) {
+    const lastSentAt = new Date(recentResult.data[0].created_at);
     const secondsSince = (Date.now() - lastSentAt.getTime()) / 1000;
     if (secondsSince < OTP_RESEND_COOLDOWN_SECONDS) {
       const waitSeconds = Math.ceil(OTP_RESEND_COOLDOWN_SECONDS - secondsSince);
@@ -116,14 +113,13 @@ async function checkSendLimits(identifier, type) {
 
   // Check hourly send limit
   const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
-  const { count } = await db
-    .from('signup_otps')
-    .select('id', { count: 'exact', head: true })
-    .eq('identifier', identifier)
-    .eq('type', type)
-    .gte('created_at', oneHourAgo);
+  const countResult = await executeDirectSQL(
+    `SELECT count(*)::int AS count FROM signup_otps
+     WHERE identifier = $1 AND type = $2 AND created_at >= $3`,
+    [identifier, type, oneHourAgo]
+  );
 
-  if (count >= OTP_MAX_SENDS) {
+  if (countResult.data[0].count >= OTP_MAX_SENDS) {
     return { allowed: false, error: 'Too many OTP requests. Please try again after an hour.' };
   }
 
@@ -137,30 +133,21 @@ async function checkSendLimits(identifier, type) {
  * @param {string} otp - Plain-text OTP (hashed before storage)
  */
 async function storeOtp(identifier, type, otp) {
-  const db = getDbAdmin();
-
   // Invalidate previous unverified OTPs for this identifier+type
-  await db
-    .from('signup_otps')
-    .delete()
-    .eq('identifier', identifier)
-    .eq('type', type)
-    .eq('verified', false);
+  await executeDirectSQL(
+    'DELETE FROM signup_otps WHERE identifier = $1 AND type = $2 AND verified = false',
+    [identifier, type]
+  );
 
   const expiresAt = new Date(Date.now() + OTP_EXPIRY_MINUTES * 60 * 1000).toISOString();
 
-  const { error } = await db
-    .from('signup_otps')
-    .insert({
-      identifier,
-      type,
-      otp_hash: hashOtp(otp),
-      expires_at: expiresAt,
-      attempts: 0,
-      verified: false
-    });
-
-  if (error) {
+  try {
+    await executeDirectSQL(
+      `INSERT INTO signup_otps (identifier, type, otp_hash, expires_at, attempts, verified)
+       VALUES ($1, $2, $3, $4, 0, false)`,
+      [identifier, type, hashOtp(otp), expiresAt]
+    );
+  } catch (error) {
     console.error('Error storing OTP:', error.message);
     throw new Error('Failed to store OTP');
   }
@@ -174,45 +161,40 @@ async function storeOtp(identifier, type, otp) {
  * @returns {{ success: boolean, error?: string, code?: string }}
  */
 async function verifyOtp(identifier, type, otp) {
-  const db = getDbAdmin();
-
   // Fetch the latest unverified OTP for this identifier+type
-  const { data: records } = await db
-    .from('signup_otps')
-    .select('*')
-    .eq('identifier', identifier)
-    .eq('type', type)
-    .eq('verified', false)
-    .order('created_at', { ascending: false })
-    .limit(1);
+  const recordsResult = await executeDirectSQL(
+    `SELECT * FROM signup_otps
+     WHERE identifier = $1 AND type = $2 AND verified = false
+     ORDER BY created_at DESC LIMIT 1`,
+    [identifier, type]
+  );
 
-  if (!records || records.length === 0) {
+  if (recordsResult.data.length === 0) {
     return { success: false, error: 'No OTP found. Please request a new one.', code: 'OTP_NOT_FOUND' };
   }
 
-  const record = records[0];
+  const record = recordsResult.data[0];
 
   // Check expiry
   if (new Date(record.expires_at) < new Date()) {
-    await db.from('signup_otps').delete().eq('id', record.id);
+    await executeDirectSQL('DELETE FROM signup_otps WHERE id = $1', [record.id]);
     return { success: false, error: 'OTP has expired. Please request a new one.', code: 'OTP_EXPIRED' };
   }
 
   // Check max attempts
   if (record.attempts >= OTP_MAX_ATTEMPTS) {
-    await db.from('signup_otps').delete().eq('id', record.id);
+    await executeDirectSQL('DELETE FROM signup_otps WHERE id = $1', [record.id]);
     return { success: false, error: 'Too many failed attempts. Please request a new OTP.', code: 'MAX_ATTEMPTS' };
   }
 
   // Compare hashes
   if (record.otp_hash !== hashOtp(otp)) {
     // Increment attempts
-    await db
-      .from('signup_otps')
-      .update({ attempts: record.attempts + 1 })
-      .eq('id', record.id);
+    await executeDirectSQL(
+      'UPDATE signup_otps SET attempts = $1 WHERE id = $2',
+      [record.attempts + 1, record.id]
+    );
 
-    const remaining = OTP_MAX_ATTEMPTS - record.attempts - 1;
     return {
       success: false,
       error: `Invalid OTP`,
@@ -221,10 +203,10 @@ async function verifyOtp(identifier, type, otp) {
   }
 
   // Mark as verified
-  await db
-    .from('signup_otps')
-    .update({ verified: true })
-    .eq('id', record.id);
+  await executeDirectSQL(
+    'UPDATE signup_otps SET verified = true WHERE id = $1',
+    [record.id]
+  );
 
   return { success: true };
 }
@@ -236,16 +218,14 @@ async function verifyOtp(identifier, type, otp) {
  * @returns {boolean}
  */
 async function isVerified(identifier, type) {
-  const db = getDbAdmin();
-  const { data } = await db
-    .from('signup_otps')
-    .select('id')
-    .eq('identifier', identifier)
-    .eq('type', type)
-    .eq('verified', true)
-    .limit(1);
+  const result = await executeDirectSQL(
+    `SELECT id FROM signup_otps
+     WHERE identifier = $1 AND type = $2 AND verified = true
+     LIMIT 1`,
+    [identifier, type]
+  );
 
-  return data && data.length > 0;
+  return result.data.length > 0;
 }
 
 // ---------------------------------------------------------------------------

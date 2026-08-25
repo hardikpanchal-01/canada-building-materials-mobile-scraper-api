@@ -10,26 +10,53 @@
 const crypto = require('crypto');
 const ticketService = require('./ticketService');
 const truckService = require('./truckService');
-const { getDbAdmin } = require('../config/database');
-const { getAuthDbAdmin } = require('../config/authDatabase');
+const { executeDirectSQL } = require('../utils/postgresExecutor');
+const { executeAuthSQL } = require('../config/authPostgres');
+
+/**
+ * Resolve req.user id (UUID or numeric) → tenant row via auth_tenant tables in
+ * PostgreSQL. Returns the tenant row (selected columns) or null.
+ */
+async function fetchTenantForUserSQL(userAccessId, tenantColumns) {
+  let numericUserId = null;
+  if (typeof userAccessId === 'number' || /^\d+$/.test(userAccessId)) {
+    numericUserId = Number(userAccessId);
+  } else {
+    const uResult = await executeAuthSQL(
+      'SELECT id FROM public.users WHERE uuid = $1 AND deleted_at IS NULL LIMIT 1',
+      [userAccessId]
+    );
+    if (uResult.data.length === 0) return null;
+    numericUserId = uResult.data[0].id;
+  }
+
+  const tResult = await executeAuthSQL(
+    `SELECT ${tenantColumns.map(c => `t.${c}`).join(', ')}
+     FROM public.tenant_users tu
+     JOIN public.tenants t ON t.id = tu.tenant_id AND t.deleted_at IS NULL
+     WHERE tu.user_id = $1 AND tu.status = 'active'
+     LIMIT 1`,
+    [numericUserId]
+  );
+  return tResult.data.length > 0 ? tResult.data[0] : null;
+}
 
 /**
  * Fetch all ticket_products for a given ticket_code and attach to ticket object.
  */
 async function enrichTicketProducts(ticket, ticketCode) {
   try {
-    const db = getDbAdmin();
-    const { data: tRow } = await db
-      .from('tickets')
-      .select('ticket_id, order_id, verifi_json')
-      .eq('ticket_code', ticketCode)
-      .limit(1)
-      .maybeSingle();
+    const tRes = await executeDirectSQL(
+      'SELECT ticket_id, order_id, verifi_json FROM tickets WHERE ticket_code = $1 LIMIT 1',
+      [ticketCode]
+    );
+    const tRow = tRes.data?.[0] || null;
     if (tRow?.ticket_id) {
-      const { data: products } = await db
-        .from('ticket_products')
-        .select('id, ticket_id, item_code, description, short_description, is_mix, is_assoc, load_qty, delv_qty, delv_qty_unit, order_qty, order_qty_unit, ticket_qty, ticket_qty_unit, acc_delv_qty, slump')
-        .eq('ticket_id', tRow.ticket_id);
+      const pRes = await executeDirectSQL(
+        'SELECT id, ticket_id, item_code, description, short_description, is_mix, is_assoc, load_qty, delv_qty, delv_qty_unit, order_qty, order_qty_unit, ticket_qty, ticket_qty_unit, acc_delv_qty, slump FROM ticket_products WHERE ticket_id = $1',
+        [tRow.ticket_id]
+      );
+      const products = pRes.data;
       ticket.ticket_products = products || [];
 
       // Set slump matching web priority: verifi_json → order_products → ticket_products
@@ -42,13 +69,11 @@ async function enrichTicketProducts(ticket, ticketCode) {
         }
       }
       if (ticket.slump == null && tRow.order_id) {
-        const { data: opRow } = await db
-          .from('order_products')
-          .select('slump')
-          .eq('order_id', tRow.order_id)
-          .not('slump', 'is', null)
-          .limit(1)
-          .maybeSingle();
+        const opRes = await executeDirectSQL(
+          'SELECT slump FROM order_products WHERE order_id = $1 AND slump IS NOT NULL LIMIT 1',
+          [tRow.order_id]
+        );
+        const opRow = opRes.data?.[0] || null;
         if (opRow?.slump) ticket.slump = opRow.slump;
       }
       if (ticket.slump == null && products?.length > 0) {
@@ -192,8 +217,8 @@ function parsePipePayload(payload) {
 
 /**
  * Fetch tenant-level QR settings for the authenticated user.
- * Resolves user UUID → tenant_id via auth_tenant.tenant_users, then reads
- * qr_enabled, qr_mode, and security_mode from auth_tenant.tenants.
+ * Resolves user UUID → tenant_id via public.tenant_users, then reads
+ * qr_enabled, qr_mode, and security_mode from public.tenants.
  *
  * @param {object} userAccess - req.user from auth middleware (has .id as UUID)
  * @returns {Promise<object|null>} { qr_enabled, qr_mode, security_mode } or null
@@ -202,48 +227,8 @@ async function getTenantQrSettings(userAccess) {
   if (!userAccess?.id) return null;
 
   try {
-    const db = getAuthDbAdmin();
-
-    // Step 1: Resolve UUID → integer user id in auth_tenant.users
-    let numericUserId = null;
-    if (typeof userAccess.id === 'number' || /^\d+$/.test(userAccess.id)) {
-      numericUserId = Number(userAccess.id);
-    } else {
-      const { data: uData } = await db
-        .schema('auth_tenant')
-        .from('users')
-        .select('id')
-        .eq('uuid', userAccess.id)
-        .is('deleted_at', null)
-        .limit(1);
-
-      if (!uData || uData.length === 0) return null;
-      numericUserId = uData[0].id;
-    }
-
-    // Step 2: Get tenant_id from tenant_users
-    const { data: tuData } = await db
-      .schema('auth_tenant')
-      .from('tenant_users')
-      .select('tenant_id')
-      .eq('user_id', numericUserId)
-      .eq('status', 'active')
-      .limit(1);
-
-    if (!tuData || tuData.length === 0) return null;
-
-    // Step 3: Get QR-related tenant columns
-    const { data: tData, error: tError } = await db
-      .schema('auth_tenant')
-      .from('tenants')
-      .select('qr_enabled, qr_mode, security_mode')
-      .eq('id', tuData[0].tenant_id)
-      .is('deleted_at', null)
-      .limit(1);
-
-    if (tError || !tData || tData.length === 0) return null;
-
-    const t = tData[0];
+    const t = await fetchTenantForUserSQL(userAccess.id, ['qr_enabled', 'qr_mode', 'security_mode']);
+    if (!t) return null;
     return {
       qr_enabled: t.qr_enabled ?? false,
       qr_mode: t.qr_mode || null,
@@ -336,14 +321,11 @@ async function verifyQrPayload(payload, userAccess) {
       // Try by order code — look up order_id from orders table
       if (qrData.orderCode) {
         try {
-          const db = getDbAdmin();
-          const { data: orderRow } = await db
-            .from('orders')
-            .select('order_id')
-            .eq('order_code', qrData.orderCode)
-            .order('order_date', { ascending: false })
-            .limit(1)
-            .maybeSingle();
+          const orderRes = await executeDirectSQL(
+            'SELECT order_id FROM orders WHERE order_code = $1 ORDER BY order_date DESC LIMIT 1',
+            [qrData.orderCode]
+          );
+          const orderRow = orderRes.data?.[0] || null;
 
           if (orderRow?.order_id) {
             console.log('[QR] Found order_id via order_code:', qrData.orderCode, '→', orderRow.order_id);
@@ -378,22 +360,21 @@ async function verifyQrPayload(payload, userAccess) {
       // Fallback: direct DB lookup by ticket_code (no date filter)
       if (qrData.ticketCode) {
         try {
-          const db = getDbAdmin();
-          const { data: ticketRow, error: ticketErr } = await db
-            .from('tickets')
-            .select('*')
-            .eq('ticket_code', qrData.ticketCode)
-            .limit(1)
-            .maybeSingle();
+          const ticketRes = await executeDirectSQL(
+            'SELECT * FROM tickets WHERE ticket_code = $1 LIMIT 1',
+            [qrData.ticketCode]
+          );
+          const ticketRow = ticketRes.data?.[0] || null;
 
-          if (!ticketErr && ticketRow) {
+          if (ticketRow) {
             console.log('[QR] ✅ Ticket found via direct DB lookup:', ticketRow.ticket_code);
 
             // Get ALL product info for this ticket
-            const { data: allProductRows } = await db
-              .from('ticket_products')
-              .select('id, ticket_id, item_code, description, short_description, is_mix, is_assoc, load_qty, delv_qty, delv_qty_unit, order_qty, order_qty_unit, ticket_qty, ticket_qty_unit, acc_delv_qty, slump')
-              .eq('ticket_id', ticketRow.ticket_id);
+            const tpRes = await executeDirectSQL(
+              'SELECT id, ticket_id, item_code, description, short_description, is_mix, is_assoc, load_qty, delv_qty, delv_qty_unit, order_qty, order_qty_unit, ticket_qty, ticket_qty_unit, acc_delv_qty, slump FROM ticket_products WHERE ticket_id = $1',
+              [ticketRow.ticket_id]
+            );
+            const allProductRows = tpRes.data;
             const productRow = (allProductRows || []).find(p => p.is_mix) || (allProductRows || [])[0];
             const productName = productRow?.item_code || null;
             const loadQty = productRow
@@ -403,23 +384,21 @@ async function verifyQrPayload(payload, userAccess) {
             // Get truck description and plant address
             let truckDesc = null;
             if (ticketRow.truck_code) {
-              const { data: truckRow } = await db
-                .from('trucks')
-                .select('description')
-                .eq('code', ticketRow.truck_code)
-                .limit(1)
-                .maybeSingle();
+              const truckRes = await executeDirectSQL(
+                'SELECT description FROM trucks WHERE code = $1 LIMIT 1',
+                [ticketRow.truck_code]
+              );
+              const truckRow = truckRes.data?.[0] || null;
               truckDesc = truckRow?.description || null;
             }
 
             let plantAddress = null;
             if (ticketRow.plant_code) {
-              const { data: plantRow } = await db
-                .from('plants')
-                .select('address1, address2, address3')
-                .eq('code', ticketRow.plant_code)
-                .limit(1)
-                .maybeSingle();
+              const plantRes = await executeDirectSQL(
+                'SELECT address1, address2, address3 FROM plants WHERE code = $1 LIMIT 1',
+                [ticketRow.plant_code]
+              );
+              const plantRow = plantRes.data?.[0] || null;
               if (plantRow) {
                 plantAddress = [plantRow.address1, plantRow.address2, plantRow.address3]
                   .filter(Boolean).join(', ') || null;
@@ -430,22 +409,18 @@ async function verifyQrPayload(payload, userAccess) {
             let orderRow = null;
             let orderSlump = null;
             if (ticketRow.order_id) {
-              const { data: oRow } = await db
-                .from('orders')
-                .select('ordered_by_name, ordered_by_phone, purchase_order, customer_job')
-                .eq('order_id', ticketRow.order_id)
-                .limit(1)
-                .maybeSingle();
-              orderRow = oRow;
+              const oRes = await executeDirectSQL(
+                'SELECT ordered_by_name, ordered_by_phone, purchase_order, customer_job FROM orders WHERE order_id = $1 LIMIT 1',
+                [ticketRow.order_id]
+              );
+              orderRow = oRes.data?.[0] || null;
 
               // Get slump from order_products as fallback (ticket_products.slump may be null)
-              const { data: opRow } = await db
-                .from('order_products')
-                .select('slump')
-                .eq('order_id', ticketRow.order_id)
-                .eq('is_mix', true)
-                .limit(1)
-                .maybeSingle();
+              const opRes = await executeDirectSQL(
+                'SELECT slump FROM order_products WHERE order_id = $1 AND is_mix = true LIMIT 1',
+                [ticketRow.order_id]
+              );
+              const opRow = opRes.data?.[0] || null;
               orderSlump = opRow?.slump || null;
             }
 
@@ -615,42 +590,8 @@ async function getTenantInfo(userAccess) {
   if (!userAccess?.id) return null;
 
   try {
-    const db = getAuthDbAdmin();
-
-    let numericUserId = null;
-    if (typeof userAccess.id === 'number' || /^\d+$/.test(userAccess.id)) {
-      numericUserId = Number(userAccess.id);
-    } else {
-      const { data: uData } = await db
-        .schema('auth_tenant')
-        .from('users')
-        .select('id')
-        .eq('uuid', userAccess.id)
-        .is('deleted_at', null)
-        .limit(1);
-      if (!uData || uData.length === 0) return null;
-      numericUserId = uData[0].id;
-    }
-
-    const { data: tuData } = await db
-      .schema('auth_tenant')
-      .from('tenant_users')
-      .select('tenant_id')
-      .eq('user_id', numericUserId)
-      .eq('status', 'active')
-      .limit(1);
-    if (!tuData || tuData.length === 0) return null;
-
-    const { data: tData } = await db
-      .schema('auth_tenant')
-      .from('tenants')
-      .select('id, uuid, name, subdomain, status, qr_user_active')
-      .eq('id', tuData[0].tenant_id)
-      .is('deleted_at', null)
-      .limit(1);
-    if (!tData || tData.length === 0) return null;
-
-    const t = tData[0];
+    const t = await fetchTenantForUserSQL(userAccess.id, ['id', 'uuid', 'name', 'subdomain', 'status', 'qr_user_active']);
+    if (!t) return null;
     return {
       tenantId: t.id,
       tenantUuid: t.uuid,

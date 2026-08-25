@@ -1,9 +1,9 @@
 /** Dashboard sharing: per-user grants + public links (ported from /api/ai/dashboards/[id]/share + public/[token]). */
 import { randomBytes } from 'node:crypto';
-import { serverDb } from './_db.mjs';
+import { db, findUserByEmail } from './_db.mjs';
 
 async function ownsDashboard(userId, id) {
-  const { data } = await serverDb
+  const { data } = await db
     .from('ai_dashboards')
     .select('id')
     .eq('id', id)
@@ -17,11 +17,11 @@ export async function getShareInfo(userId, id) {
     throw Object.assign(new Error('Not found'), { status: 404 });
   }
   const [shares, dash] = await Promise.all([
-    serverDb
+    db
       .from('ai_dashboard_shares')
       .select('id, shared_with_user_id, permission, created_at')
       .eq('dashboard_id', id),
-    serverDb.from('ai_dashboards').select('share_token, is_public').eq('id', id).single(),
+    db.from('ai_dashboards').select('share_token, is_public').eq('id', id).single(),
   ]);
   return {
     shares: shares.data ?? [],
@@ -38,14 +38,9 @@ export async function applyShare(userId, id, body = {}) {
     if (!body.email || !body.email.includes('@')) {
       throw Object.assign(new Error('valid email required'), { status: 400 });
     }
-    const { data: target, error: lookupErr } = await serverDb.auth.admin.listUsers({
-      page: 1,
-      perPage: 1000,
-    });
-    if (lookupErr) throw Object.assign(new Error(lookupErr.message), { status: 500 });
-    const found = target.users.find((u) => u.email?.toLowerCase() === body.email.toLowerCase());
+    const found = await findUserByEmail(body.email);
     if (!found) throw Object.assign(new Error('user not found'), { status: 404 });
-    const { error } = await serverDb
+    const { error } = await db
       .from('ai_dashboard_shares')
       .insert({ dashboard_id: id, shared_with_user_id: found.id, created_by: userId });
     if (error && !/duplicate/i.test(error.message)) {
@@ -55,7 +50,7 @@ export async function applyShare(userId, id, body = {}) {
   }
   if (body.action === 'generateLink') {
     const token = randomBytes(24).toString('base64url');
-    const { error } = await serverDb
+    const { error } = await db
       .from('ai_dashboards')
       .update({ share_token: token, is_public: true })
       .eq('id', id);
@@ -63,7 +58,7 @@ export async function applyShare(userId, id, body = {}) {
     return { token, isPublic: true };
   }
   if (body.action === 'revokeLink') {
-    const { error } = await serverDb
+    const { error } = await db
       .from('ai_dashboards')
       .update({ share_token: null, is_public: false })
       .eq('id', id);
@@ -80,7 +75,7 @@ export async function revokeUserShare(userId, id, sharedWithUserId) {
   if (!sharedWithUserId) {
     throw Object.assign(new Error('sharedWithUserId required'), { status: 400 });
   }
-  const { error } = await serverDb
+  const { error } = await db
     .from('ai_dashboard_shares')
     .delete()
     .eq('dashboard_id', id)
@@ -91,7 +86,7 @@ export async function revokeUserShare(userId, id, sharedWithUserId) {
 
 export async function getPublicDashboard(token) {
   if (!token) throw Object.assign(new Error('Not found'), { status: 404 });
-  const { data, error } = await serverDb
+  const { data, error } = await db
     .from('ai_dashboards')
     .select('id, title, layout, widgets, updated_at')
     .eq('share_token', token)

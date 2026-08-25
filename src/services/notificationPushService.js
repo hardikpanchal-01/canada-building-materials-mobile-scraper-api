@@ -1,4 +1,4 @@
-const { getNotificationDb } = require('../config/notificationDatabase');
+const { executeDirectSQL } = require('../utils/postgresExecutor');
 const { getMessaging } = require('../config/Firebase');
 
 const FCM_BATCH_SIZE = 500;
@@ -144,58 +144,59 @@ async function sendPushNotificationToMultipleBatched(deviceTokens, title, body, 
 }
 
 /**
- * Get active device tokens for a user from notification the database
+ * Get active device tokens for a user from notification database
  */
 async function getUserDeviceTokens(userId) {
-  const db = getNotificationDb();
-
-  const { data, error } = await db
-    .from('user_devices')
-    .select('device_token')
-    .eq('user_id', userId)
-    .eq('is_active', true);
-
-  if (error) throw new Error(`Failed to fetch device tokens: ${error.message}`);
+  let data;
+  try {
+    const result = await executeDirectSQL(
+      'SELECT device_token FROM user_devices WHERE user_id = $1 AND is_active = true',
+      [userId]
+    );
+    data = result.data;
+  } catch (error) {
+    throw new Error(`Failed to fetch device tokens: ${error.message}`);
+  }
 
   return (data || []).map(d => d.device_token).filter(Boolean);
 }
 
 /**
- * Check single device token in notification the database
+ * Check single device token in notification database
  */
 async function checkDeviceToken(deviceToken) {
-  const db = getNotificationDb();
-
-  const { data, error } = await db
-    .from('user_devices')
-    .select('id, user_id, device_id, device_token, device_name, device_type, is_active')
-    .eq('device_token', deviceToken)
-    .eq('is_active', true)
-    .single();
-
-  if (error && error.code !== 'PGRST116') {
+  try {
+    const result = await executeDirectSQL(
+      `SELECT id, user_id, device_id, device_token, device_name, device_type, is_active
+       FROM user_devices
+       WHERE device_token = $1 AND is_active = true
+       LIMIT 1`,
+      [deviceToken]
+    );
+    // 0 rows is not an error: return null
+    return (result.data && result.data.length > 0 ? result.data[0] : null);
+  } catch (error) {
     console.error('⚠️  Error checking device token:', error.message);
     return null;
   }
-
-  return data || null;
 }
 
 /**
- * Batch check device tokens in notification the database
+ * Batch check device tokens in notification database
  */
 async function batchCheckDeviceTokens(deviceTokens) {
   if (!Array.isArray(deviceTokens) || deviceTokens.length === 0) return {};
 
-  const db = getNotificationDb();
-
-  const { data, error } = await db
-    .from('user_devices')
-    .select('id, user_id, device_id, device_token, device_name, device_type, is_active')
-    .in('device_token', deviceTokens)
-    .eq('is_active', true);
-
-  if (error) {
+  let data;
+  try {
+    const result = await executeDirectSQL(
+      `SELECT id, user_id, device_id, device_token, device_name, device_type, is_active
+       FROM user_devices
+       WHERE device_token = ANY($1) AND is_active = true`,
+      [deviceTokens]
+    );
+    data = result.data;
+  } catch (error) {
     console.error('⚠️  Error batch checking device tokens:', error.message);
     return {};
   }
@@ -209,26 +210,21 @@ async function batchCheckDeviceTokens(deviceTokens) {
 }
 
 /**
- * Batch deactivate invalid tokens in notification the database
+ * Batch deactivate invalid tokens in notification database
  */
 async function batchDeactivateTokens(deviceTokens) {
   if (!Array.isArray(deviceTokens) || deviceTokens.length === 0) return 0;
 
-  const db = getNotificationDb();
-
-  const { data, error } = await db
-    .from('user_devices')
-    .update({ is_active: false })
-    .in('device_token', deviceTokens)
-    .eq('is_active', true)
-    .select('id');
-
-  if (error) {
+  try {
+    const result = await executeDirectSQL(
+      'UPDATE user_devices SET is_active = false WHERE device_token = ANY($1) AND is_active = true RETURNING id',
+      [deviceTokens]
+    );
+    return result.data?.length || 0;
+  } catch (error) {
     console.error('⚠️  Error deactivating tokens:', error.message);
     return 0;
   }
-
-  return data?.length || 0;
 }
 
 module.exports = {

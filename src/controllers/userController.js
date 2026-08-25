@@ -322,7 +322,7 @@ async function updateProfile(req, res) {
  *     summary: Upload profile picture
  *     description: |
  *       Uploads a profile picture for the authenticated user.
- *       The image is stored in a object storage bucket and the public URL
+ *       The image is stored in an S3 bucket and the public URL
  *       is saved to the user's `avatar_url` column.
  *
  *       **Accepted formats:** JPEG, PNG, GIF, WebP
@@ -393,7 +393,8 @@ async function uploadAvatar(req, res) {
       userId,
       req.file.buffer,
       req.file.mimetype,
-      req.file.originalname
+      req.file.originalname,
+      req.user?.email
     );
 
     return res.status(200).json({

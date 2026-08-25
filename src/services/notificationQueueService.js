@@ -1,7 +1,9 @@
-const { getNotificationDb } = require('../config/notificationDatabase');
+const { executeDirectSQL } = require('../utils/postgresExecutor');
 
 /**
- * Get notifications for a user filtered by tenant with pagination
+ * Get notifications for a user filtered by tenant with pagination.
+ * Queries the notification_queue table via direct PostgreSQL.
+ *
  * @param {string} userId - User UUID
  * @param {number} tenantId - Tenant ID
  * @param {number} page - Page number (1-based)
@@ -9,30 +11,75 @@ const { getNotificationDb } = require('../config/notificationDatabase');
  * @returns {Object} { notifications, total, page, limit, totalPages }
  */
 async function getNotifications(userId, tenantId, page = 1, limit = 50) {
-  const db = getNotificationDb();
+  const offset = (page - 1) * limit;
 
-  const from = (page - 1) * limit;
-  const to = from + limit - 1;
+  const countParams = [userId];
+  let countWhere = 'WHERE user_id = $1';
+  if (tenantId) {
+    countParams.push(tenantId);
+    countWhere += ` AND tenant_id = $${countParams.length}`;
+  }
 
-  const { data, error, count } = await db
-    .from('notification_queue')
-    .select('*', { count: 'exact' })
-    .eq('user_id', userId)
-    .eq('tenant_id', tenantId)
-    .order('created_at', { ascending: false })
-    .range(from, to);
+  const countResult = await executeDirectSQL(
+    `SELECT COUNT(*) AS total FROM notification_queue ${countWhere}`,
+    countParams
+  );
+  const total = parseInt(countResult.data[0]?.total || '0', 10);
 
-  if (error) throw new Error(`Failed to fetch notifications: ${error.message}`);
+  const dataParams = [...countParams, limit, offset];
+  const dataResult = await executeDirectSQL(
+    `SELECT * FROM notification_queue ${countWhere}
+     ORDER BY created_at DESC
+     LIMIT $${dataParams.length - 1} OFFSET $${dataParams.length}`,
+    dataParams
+  );
 
   return {
-    notifications: data || [],
-    total: count || 0,
+    notifications: dataResult.data || [],
+    total,
     page,
     limit,
-    totalPages: Math.ceil((count || 0) / limit)
+    totalPages: Math.ceil(total / limit)
   };
 }
 
+/**
+ * Mark a single notification as read by queue_uuid
+ */
+async function markAsRead(queueUuid, userId) {
+  const now = new Date().toISOString();
+  const result = await executeDirectSQL(
+    `UPDATE notification_queue
+     SET status = 'delivered', delivered_at = $1, updated_at = $1
+     WHERE queue_uuid = $2 AND user_id = $3
+     RETURNING *`,
+    [now, queueUuid, userId]
+  );
+
+  if (!result.data || result.data.length === 0) {
+    throw new Error('Notification not found');
+  }
+  return result.data[0];
+}
+
+/**
+ * Mark all notifications as read for a user in a tenant
+ */
+async function markAllAsRead(userId, tenantId) {
+  const now = new Date().toISOString();
+  const result = await executeDirectSQL(
+    `UPDATE notification_queue
+     SET status = 'delivered', delivered_at = $1, updated_at = $1
+     WHERE user_id = $2 AND tenant_id = $3 AND status = 'pending'
+     RETURNING id`,
+    [now, userId, tenantId]
+  );
+
+  return { updated: result.data?.length || 0 };
+}
+
 module.exports = {
-  getNotifications
+  getNotifications,
+  markAsRead,
+  markAllAsRead
 };

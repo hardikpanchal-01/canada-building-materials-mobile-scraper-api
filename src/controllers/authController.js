@@ -459,7 +459,7 @@ async function me(req, res) {
  *       1. Validates email format
  *       2. Checks rate limiting (5 min window)
  *       3. Verifies user exists in database
- *       4. Generates reset token via the database
+ *       4. Generates reset token via Auth API
  *       5. Sends password reset email
  *
  *       **Security Notes:**
@@ -1036,7 +1036,7 @@ async function sendPhoneOtp(req, res) {
  *     summary: Verify phone OTP and complete registration (Step 4)
  *     description: |
  *       Verifies the phone OTP and completes user registration.
- *       Creates the user in the auth store and public.users table.
+ *       Creates the user in auth.users and public.users table.
  *       Returns JWT access and refresh tokens on success.
  *     tags: [Auth]
  *     requestBody:
@@ -1206,17 +1206,15 @@ async function resendEmailOtp(req, res) {
       return res.status(400).json({ success: false, message: 'Email is required' });
     }
 
-    const { getDbAdmin } = require('../config/database');
-    const db = getDbAdmin();
+    const { executeDirectSQL } = require('../utils/postgresExecutor');
 
     // Ensure there is a pending signup
-    const { data: pending } = await db
-      .from('signup_pending')
-      .select('email')
-      .eq('email', email.toLowerCase().trim())
-      .limit(1);
+    const pendingResult = await executeDirectSQL(
+      'SELECT email FROM signup_pending WHERE email = $1 LIMIT 1',
+      [email.toLowerCase().trim()]
+    );
 
-    if (!pending || pending.length === 0) {
+    if (pendingResult.data.length === 0) {
       return res.status(404).json({ success: false, message: 'No pending signup found. Please sign up first.' });
     }
 
@@ -1269,17 +1267,16 @@ async function resendPhoneOtp(req, res) {
       return res.status(400).json({ success: false, message: 'Email is required' });
     }
 
-    const { getDbAdmin } = require('../config/database');
-    const db = getDbAdmin();
+    const { executeDirectSQL } = require('../utils/postgresExecutor');
     const normalizedEmail = email.toLowerCase().trim();
 
-    const { data: pending } = await db
-      .from('signup_pending')
-      .select('*')
-      .eq('email', normalizedEmail)
-      .limit(1);
+    const pendingResult = await executeDirectSQL(
+      'SELECT * FROM signup_pending WHERE email = $1 LIMIT 1',
+      [normalizedEmail]
+    );
+    const pending = pendingResult.data;
 
-    if (!pending || pending.length === 0) {
+    if (pending.length === 0) {
       return res.status(404).json({ success: false, message: 'No pending signup found.' });
     }
 

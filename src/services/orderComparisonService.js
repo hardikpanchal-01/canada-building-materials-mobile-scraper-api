@@ -6,12 +6,12 @@
  */
 
 const { executeDirectSQL } = require('../utils/postgresExecutor');
-const { CommandCloudAPI } = require('./commandCloudService');
+const { ConcreteGoAPI } = require('./concreteGoService');
 
 // Batch size for database queries (process N order codes at a time)
 const DB_BATCH_SIZE = parseInt(process.env.DB_BATCH_SIZE) || 50;
 
-// Command Cloud raw status codes to readable name mapping
+// ConcreteGo raw status codes to readable name mapping
 const STATUS_CODE_TO_NAME = {
   0: 'Normal',
   1: 'Will Call',
@@ -78,32 +78,32 @@ function getOrderStatusCategory(order) {
 }
 
 /**
- * Check if a Command Cloud raw status is equivalent to a Truckast status category.
+ * Check if a ConcreteGo raw status is equivalent to a Truckast status category.
  *
- * Command Cloud "Normal" means the order is active, which maps to Pre-Pour or In-Process.
- * Command Cloud "Hold"/"Will Call"/"Weather Permitting"/"Wait List" are pre-pour states.
+ * ConcreteGo "Normal" means the order is active, which maps to Pre-Pour or In-Process.
+ * ConcreteGo "Hold"/"Will Call"/"Weather Permitting"/"Wait List" are pre-pour states.
  *
- * @param {string} concreteGoStatus - Raw Command Cloud status string
+ * @param {string} concreteGoStatus - Raw ConcreteGo status string
  * @param {string} truckastCategory - Truckast computed status category
  * @returns {boolean} True if the statuses are considered equivalent
  */
 function isStatusEquivalent(concreteGoStatus, truckastCategory) {
-  const cc = (concreteGoStatus || '').toLowerCase().trim();
+  const cg = (concreteGoStatus || '').toLowerCase().trim();
   const tc = (truckastCategory || '').toLowerCase().trim();
 
-  if (cc === tc) return true;
+  if (cg === tc) return true;
 
-  // Command Cloud "Normal" = active order → matches Pre-Pour or In-Process
-  if (cc === 'normal' && (tc === 'pre-pour' || tc === 'in-process')) return true;
+  // ConcreteGo "Normal" = active order → matches Pre-Pour or In-Process
+  if (cg === 'normal' && (tc === 'pre-pour' || tc === 'in-process')) return true;
 
-  // Command Cloud hold states → matches Pre-Pour
-  if (['hold', 'will call', 'weather permitting', 'wait list'].includes(cc) && tc === 'pre-pour') return true;
+  // ConcreteGo hold states → matches Pre-Pour
+  if (['hold', 'will call', 'weather permitting', 'wait list'].includes(cg) && tc === 'pre-pour') return true;
 
-  // Command Cloud "Completed" ↔ Truckast "Completed"
-  if (cc === 'completed' && tc === 'completed') return true;
+  // ConcreteGo "Completed" ↔ Truckast "Completed"
+  if (cg === 'completed' && tc === 'completed') return true;
 
   // Both cancelled
-  if (['cancelled', 'canceled'].includes(cc) && tc === 'canceled') return true;
+  if (['cancelled', 'canceled'].includes(cg) && tc === 'canceled') return true;
 
   return false;
 }
@@ -340,7 +340,7 @@ async function fetchSystemOrdersBatch(orderCodes, minDate, maxDate, timeoutMs = 
         t.order_id,
         COALESCE(SUM(tp.load_qty), 0) as ticketed_qty
       FROM tickets t
-      JOIN ticket_products tp ON tp.ticket_id = t.ticket_id AND tp.is_mix = true
+      JOIN ticket_products tp ON tp.ticket_id = t.id AND tp.is_mix = true
       WHERE t.remove_reason_code IS NULL OR TRIM(t.remove_reason_code) = ''
       GROUP BY t.order_id
     ),
@@ -397,7 +397,7 @@ async function fetchSystemOrdersBatch(orderCodes, minDate, maxDate, timeoutMs = 
       COALESCE(lt.is_last_load_completed, false) as is_last_load_completed
     FROM orders o
     LEFT JOIN order_products op ON op.order_id = o.order_id
-      AND (UPPER(op.order_qty_unit) = 'YDQ' AND op.is_mix = true)
+      AND (op.order_qty_unit = 'YDQ' AND op.is_mix = true)
     LEFT JOIN order_product_schedules ops ON ops.order_product_id = op.id
     LEFT JOIN schedule_fallback sfb ON sfb.order_id = o.order_id
     LEFT JOIN order_notes_agg ona ON ona.order_id = o.order_id
@@ -453,6 +453,7 @@ async function fetchSystemOrders(orderCodes, minDate, maxDate, batchSize = DB_BA
       const batchResults = await fetchSystemOrdersBatch(batch, minDate, maxDate);
       results.push(...batchResults);
     } catch (error) {
+      console.error(`Batch ${Math.floor(i / batchSize) + 1} failed (${batch.length} orders): ${error.message}`);
       // Continue with other batches - partial results are better than none
     }
   }
@@ -626,14 +627,16 @@ function compareValues(value1, value2, fieldType = 'string') {
     const rounded2 = Math.round(num2 * 100) / 100;
     if (rounded1 === rounded2) return true;
     
-    // Allow small quantity differences up to 0.02 (client adds 0.01 to prevent order auto-close)
-    // Also handle very small relative differences that might occur due to floating point precision
+    // Allow small quantity differences up to 0.03 (rounding + the client's 0.01
+    // auto-close padding). Round the diff to 2dp first so a true 0.02/0.03 gap isn't
+    // rejected by floating-point noise (e.g. 42.02 - 42.00 = 0.0200000000003).
     const diff = Math.abs(num1 - num2);
+    const roundedDiff = Math.round(diff * 100) / 100;
     const maxVal = Math.max(Math.abs(num1), Math.abs(num2), 1);
     const relativeDiff = diff / maxVal;
 
     // Use absolute tolerance for small numbers, relative tolerance for larger numbers
-    return diff <= 0.02 || relativeDiff < 0.0001;
+    return roundedDiff <= 0.03 || relativeDiff < 0.0001;
   }
 
   if (fieldType === 'string') {
@@ -656,11 +659,17 @@ function compareOrder(scrapedOrder, systemOrder) {
   const differences = [];
   let matchStatus = 'matched';
 
-  // Compare start_time (normalize both to HH:MM format for comparison)
+  // Compare start_time (normalize both to HH:MM format for comparison).
+  // - For BROWSER-EXTENSION orders (scrapedOrder._from_extension): skip start_time
+  //   entirely — the extension's feed time is noisy and not worth comparing.
+  // - Otherwise skip only when the scraper didn't capture a real time (empty or the
+  //   00:00 "unset" default), which would be a false mismatch, not a real disagreement.
+  const skipStartTime = scrapedOrder._from_extension === true;
   const scrapedStartTime = normalizeStartTime(scrapedOrder.start_time) || '';
   const systemStartTime = normalizeStartTime(systemOrder.start_time) || '';
-  
-  if (!compareValues(scrapedStartTime, systemStartTime, 'string')) {
+  const scrapedHasRealStartTime = scrapedStartTime && scrapedStartTime !== '00:00';
+
+  if (!skipStartTime && scrapedHasRealStartTime && !compareValues(scrapedStartTime, systemStartTime, 'string')) {
     differences.push({
       field: 'start_time',
       external_value: scrapedOrder.start_time || null,
@@ -688,8 +697,13 @@ function compareOrder(scrapedOrder, systemOrder) {
     });
   }
 
-  // Compare delivery_address (first 2 words matching is sufficient per client requirement)
-  if (!matchesFirstTwoWords(scrapedOrder.delivery_address, systemOrder.delivery_address)) {
+  // Compare delivery_address (first 2 words matching is sufficient per client requirement).
+  // Skip when the scraper didn't capture an address. ConcreteGo's list/grid feed (read by
+  // the browser extension) omits the delivery address for some orders, so an empty scraped
+  // value means "not captured" — flagging empty-vs-populated as a mismatch is a false
+  // positive. When the scraper DOES provide an address it is still fully compared.
+  const scrapedDeliveryAddress = (scrapedOrder.delivery_address || '').toString().trim();
+  if (scrapedDeliveryAddress && !matchesFirstTwoWords(scrapedOrder.delivery_address, systemOrder.delivery_address)) {
     differences.push({
       field: 'delivery_address',
       external_value: scrapedOrder.delivery_address || null,
@@ -766,7 +780,7 @@ function compareOrder(scrapedOrder, systemOrder) {
 
   // Compare status using Truckast category logic
   // Truckast status is a computed category (Pre-Pour, In-Process, Completed, Canceled)
-  // Command Cloud status is a raw string (Normal, Hold, Will Call, Completed, etc.)
+  // ConcreteGo status is a raw string (Normal, Hold, Will Call, Completed, etc.)
   const scrapedStatusStr = scrapedOrder.status ? String(scrapedOrder.status).trim() : 'Normal';
   const systemCategory = systemOrder.status_category || getOrderStatusCategory(systemOrder);
 
@@ -1069,15 +1083,15 @@ async function compareOrdersWithSystem({
 }
 
 /**
- * Map a Command Cloud API order (PascalCase) to comparison format (snake_case)
+ * Map a ConcreteGo API order (PascalCase) to comparison format (snake_case)
  *
- * Extracts relevant fields from the Command Cloud OrderRet object and maps them
+ * Extracts relevant fields from the ConcreteGo OrderRet object and maps them
  * to the same snake_case format used in comparisons.
  *
- * @param {object} apiOrder - Raw order object from Command Cloud API (PascalCase fields)
+ * @param {object} apiOrder - Raw order object from ConcreteGo API (PascalCase fields)
  * @returns {object} Mapped order with snake_case fields
  */
-function mapCommandCloudOrderToComparisonFormat(apiOrder) {
+function mapConcreteGoOrderToComparisonFormat(apiOrder) {
   if (!apiOrder) return null;
 
   /**
@@ -1114,7 +1128,7 @@ function mapCommandCloudOrderToComparisonFormat(apiOrder) {
   let plantCode = null;
   const products = [];
 
-  // Command Cloud API returns products under Products.Product (confirmed from karl-truck project)
+  // ConcreteGo API returns products under Products.Product (confirmed from karl-truck project)
   const productData = apiOrder.Products?.Product || apiOrder.OrderProductRet || apiOrder.ProductRet;
   if (productData) {
     const productList = Array.isArray(productData) ? productData : [productData];
@@ -1125,7 +1139,7 @@ function mapCommandCloudOrderToComparisonFormat(apiOrder) {
       const unit = pickString(prod, 'OrderQtyUnit', 'UnitOfMeasure', 'UOM', 'Unit') || '';
 
       // Extract schedule info for this product
-      // Command Cloud API nests schedules under Schedules.Schedule (confirmed from karl-truck project)
+      // ConcreteGo API nests schedules under Schedules.Schedule (confirmed from karl-truck project)
       let prodStartTime = null;
       let prodPlantCode = null;
       const scheduleData = prod.Schedules?.Schedule || prod.OrderProductScheduleRet || prod.ScheduleRet || prod.Schedule;
@@ -1148,7 +1162,7 @@ function mapCommandCloudOrderToComparisonFormat(apiOrder) {
     }
 
     // Use first product as primary (or first CY product if available)
-    const cyProduct = products.find(p => p.unit && p.unit.toUpperCase() === 'YDQ');
+    const cyProduct = products.find(p => p.unit && p.unit.toUpperCase() === 'CY');
     const primaryProduct = cyProduct || products[0] || null;
     if (primaryProduct) {
       productCode = primaryProduct.code;
@@ -1190,7 +1204,7 @@ function mapCommandCloudOrderToComparisonFormat(apiOrder) {
   const addrParts = [addr1, addr2, addr3].filter(a => a && a.trim());
   deliveryAddress = addrParts.join(', ').trim();
 
-  // Check notes - Command Cloud API returns notes under Notes.Note
+  // Check notes - ConcreteGo API returns notes under Notes.Note
   const hasNotes = !!(apiOrder.Notes?.Note || apiOrder.OrderNoteRet || apiOrder.NoteRet);
 
   return {
@@ -1214,12 +1228,12 @@ function mapCommandCloudOrderToComparisonFormat(apiOrder) {
 }
 
 /**
- * Format a date string to MM/dd/yyyy for Command Cloud API
+ * Format a date string to MM/dd/yyyy for ConcreteGo API
  *
  * @param {string} dateStr - Date in YYYY-MM-DD format
  * @returns {string} Date in MM/dd/yyyy format
  */
-function formatDateForCommandCloudAPI(dateStr) {
+function formatDateForConcreteGoAPI(dateStr) {
   if (!dateStr) return '';
   const normalized = normalizeDate(dateStr);
   if (!normalized || normalized.length !== 10) return dateStr;
@@ -1228,14 +1242,14 @@ function formatDateForCommandCloudAPI(dateStr) {
 }
 
 /**
- * Re-validate mismatched orders by fetching fresh data from the Command Cloud SOAP API
+ * Re-validate mismatched orders by fetching fresh data from the ConcreteGo SOAP API
  *
- * For each mismatched order, queries the Command Cloud API to get the current state
- * and re-compares each mismatched field. Compares fresh Command Cloud values against
+ * For each mismatched order, queries the ConcreteGo API to get the current state
+ * and re-compares each mismatched field. Compares fresh ConcreteGo values against
  * the Truckast DB values (system_order from original comparison) to determine if
  * the mismatch is "confirmed" (still different) or "resolved" (now matching).
  *
- * Graceful degradation: if Command Cloud API is unavailable or auth fails, skips
+ * Graceful degradation: if ConcreteGo API is unavailable or auth fails, skips
  * re-validation and returns empty results without failing the job.
  *
  * @param {array} mismatchedOrders - Array of mismatched order objects from comparison
@@ -1251,27 +1265,27 @@ async function revalidateMismatchedOrders(mismatchedOrders) {
     };
   }
 
-  console.log(`🔄 Re-validating ${mismatchedOrders.length} mismatched order(s) via Command Cloud API...`);
+  console.log(`🔄 Re-validating ${mismatchedOrders.length} mismatched order(s) via ConcreteGo API...`);
 
-  // Authenticate with Command Cloud API
-  const commandCloudAPI = new CommandCloudAPI();
+  // Authenticate with ConcreteGo API
+  const concreteGoAPI = new ConcreteGoAPI();
   let ticketHeader;
   try {
-    const authResult = await commandCloudAPI.loginWithEnvCredentials();
+    const authResult = await concreteGoAPI.loginWithEnvCredentials();
     ticketHeader = authResult.ticketHeader;
-    console.log('🔑 Command Cloud API authentication successful for re-validation');
+    console.log('🔑 ConcreteGo API authentication successful for re-validation');
   } catch (authError) {
-    console.warn(`⚠️ Command Cloud API auth failed, skipping re-validation: ${authError.message}`);
+    console.warn(`⚠️ ConcreteGo API auth failed, skipping re-validation: ${authError.message}`);
     return {
       revalidated_count: 0,
       confirmed_count: 0,
       resolved_count: 0,
-      error: `Command Cloud API auth failed: ${authError.message}`,
+      error: `ConcreteGo API auth failed: ${authError.message}`,
       orders: []
     };
   }
 
-  // Re-validate each mismatched order by querying Command Cloud API
+  // Re-validate each mismatched order by querying ConcreteGo API
   const revalidatedOrders = [];
   let totalConfirmedOrders = 0;
   let totalResolvedOrders = 0;
@@ -1287,11 +1301,11 @@ async function revalidateMismatchedOrders(mismatchedOrders) {
 
     if (!orderCode) continue;
 
-    // Query Command Cloud API for this order
+    // Query ConcreteGo API for this order
     let freshApiOrder = null;
     try {
-      const apiDateFormatted = formatDateForCommandCloudAPI(orderDate);
-      const apiOrders = await commandCloudAPI.queryOrders({
+      const apiDateFormatted = formatDateForConcreteGoAPI(orderDate);
+      const apiOrders = await concreteGoAPI.queryOrders({
         orderCode: orderCode,
         fromOrderDate: apiDateFormatted,
         toOrderDate: apiDateFormatted,
@@ -1307,14 +1321,14 @@ async function revalidateMismatchedOrders(mismatchedOrders) {
       }
     } catch (queryError) {
       apiErrorCount++;
-      console.warn(`⚠️ Failed to query Command Cloud for order ${orderCode}: ${queryError.message}`);
-      // Mark all differences as confirmed if API query fails
+      console.warn(`⚠️ Failed to query ConcreteGo for order ${orderCode}: ${queryError.message}`);
+      // Mark differences as unverified (API error) — not confirmed
       const revalidatedDiffs = (order.differences || []).map(diff => ({
         field: diff.field,
         scraped_value: diff.external_value,
         initial_system_value: diff.system_value,
         fresh_system_value: null,
-        revalidation_status: 'confirmed'
+        revalidation_status: 'unverified'
       }));
       totalConfirmedOrders++;
 
@@ -1332,7 +1346,7 @@ async function revalidateMismatchedOrders(mismatchedOrders) {
 
     if (!freshApiOrder) {
       apiNotFoundCount++;
-      // Order not found in Command Cloud API - mark all differences as confirmed
+      // Order not found in ConcreteGo API - mark all differences as confirmed
       const revalidatedDiffs = (order.differences || []).map(diff => ({
         field: diff.field,
         scraped_value: diff.external_value,
@@ -1355,8 +1369,8 @@ async function revalidateMismatchedOrders(mismatchedOrders) {
     }
 
     apiFoundCount++;
-    // Map Command Cloud PascalCase fields to comparison format
-    const freshMapped = mapCommandCloudOrderToComparisonFormat(freshApiOrder);
+    // Map ConcreteGo PascalCase fields to comparison format
+    const freshMapped = mapConcreteGoOrderToComparisonFormat(freshApiOrder);
 
     // Find matching product for product-specific comparison
     // Try exact match first, then prefix/contains match for composite codes
@@ -1385,7 +1399,7 @@ async function revalidateMismatchedOrders(mismatchedOrders) {
       }
     }
 
-    // Build fresh values from Command Cloud API response
+    // Build fresh values from ConcreteGo API response
     // Use product-specific values when product match is found
     const hasProductData = freshMapped.products && freshMapped.products.length > 0;
     const freshValues = {
@@ -1404,7 +1418,7 @@ async function revalidateMismatchedOrders(mismatchedOrders) {
     // If the API didn't return product data, skip re-validation for these fields
     const productDependentFields = new Set(['start_time', 'plant_code', 'product_code', 'ordered_qty', 'delivered_qty']);
 
-    // Re-validate each difference: compare fresh Command Cloud value vs Truckast DB value
+    // Re-validate each difference: compare fresh ConcreteGo value vs Truckast DB value
     let orderConfirmed = 0;
     let orderResolved = 0;
     const revalidatedDiffs = (order.differences || []).map(diff => {
@@ -1432,7 +1446,7 @@ async function revalidateMismatchedOrders(mismatchedOrders) {
         isResolved = compareValues(freshValue, systemValue, 'number');
       } else if (diff.field === 'status') {
         // systemValue is a Truckast category (Pre-Pour, In-Process, Completed, Canceled)
-        // freshValue is a Command Cloud API raw status (Normal, Hold, etc.)
+        // freshValue is a ConcreteGo API raw status (Normal, Hold, etc.)
         // Check if the fresh API status is equivalent to the Truckast category
         const freshStatusStr = freshValue ? String(freshValue).trim() : 'Normal';
         isResolved = isStatusEquivalent(freshStatusStr, systemValue);
@@ -1502,7 +1516,7 @@ async function revalidateMismatchedOrders(mismatchedOrders) {
  * Replicates the web app's getCompanySummaryData() logic exactly:
  *
  * Web app flow:
- * 1. the database query: orders with order_products!inner (INNER JOIN, any product)
+ * 1. PostgreSQL query: orders with order_products!inner (INNER JOIN, any product)
  * 2. Post-filter: keep orders that have at least one CY product
  * 3. Exclusion: customer patterns filtered to CONCRETE-only, ALL product &
  *    delivery_address patterns kept. All use includes() (substring match).
@@ -1529,7 +1543,7 @@ async function fetchDashboardCounts(minDate, maxDate) {
       AND EXISTS (
         SELECT 1 FROM order_products op_cy
         WHERE op_cy.order_id = o.order_id
-          AND UPPER(op_cy.order_qty_unit) = 'YDQ'
+          AND op_cy.order_qty_unit = 'YDQ'
       )
     GROUP BY o.order_id, o.order_code, o.customer_name,
              o.delivery_addr1, o.removed, o.remove_reason_code
@@ -1590,9 +1604,9 @@ async function fetchDashboardCounts(minDate, maxDate) {
 }
 
 /**
- * Re-validate missing orders by fetching data from the Command Cloud SOAP API.
+ * Re-validate missing orders by fetching data from the ConcreteGo SOAP API.
  *
- * For each order that is missing in the Truckast DB, queries the Command Cloud API.
+ * For each order that is missing in the Truckast DB, queries the ConcreteGo API.
  * If the API returns the order, it is marked as "resolved" (found in source system,
  * ready to be inserted into Truckast DB). If not found, it stays "still_missing".
  *
@@ -1609,22 +1623,22 @@ async function revalidateMissingOrders(missingOrders) {
     };
   }
 
-  console.log(`🔄 Re-validating ${missingOrders.length} missing order(s) via Command Cloud API...`);
+  console.log(`🔄 Re-validating ${missingOrders.length} missing order(s) via ConcreteGo API...`);
 
-  // Authenticate with Command Cloud API
-  const commandCloudAPI = new CommandCloudAPI();
+  // Authenticate with ConcreteGo API
+  const concreteGoAPI = new ConcreteGoAPI();
   let ticketHeader;
   try {
-    const authResult = await commandCloudAPI.loginWithEnvCredentials();
+    const authResult = await concreteGoAPI.loginWithEnvCredentials();
     ticketHeader = authResult.ticketHeader;
-    console.log('🔑 Command Cloud API authentication successful for missing order re-validation');
+    console.log('🔑 ConcreteGo API authentication successful for missing order re-validation');
   } catch (authError) {
-    console.warn(`⚠️ Command Cloud API auth failed, skipping missing order re-validation: ${authError.message}`);
+    console.warn(`⚠️ ConcreteGo API auth failed, skipping missing order re-validation: ${authError.message}`);
     return {
       total_count: missingOrders.length,
       resolved_count: 0,
       still_missing_count: missingOrders.length,
-      error: `Command Cloud API auth failed: ${authError.message}`,
+      error: `ConcreteGo API auth failed: ${authError.message}`,
       orders: []
     };
   }
@@ -1640,12 +1654,12 @@ async function revalidateMissingOrders(missingOrders) {
 
     if (!orderCode) continue;
 
-    // Query Command Cloud API for this order
+    // Query ConcreteGo API for this order
     let freshApiOrder = null;
     let rawApiOrder = null;
     try {
-      const apiDateFormatted = formatDateForCommandCloudAPI(orderDate);
-      const apiOrders = await commandCloudAPI.queryOrders({
+      const apiDateFormatted = formatDateForConcreteGoAPI(orderDate);
+      const apiOrders = await concreteGoAPI.queryOrders({
         orderCode: orderCode,
         fromOrderDate: apiDateFormatted,
         toOrderDate: apiDateFormatted,
@@ -1657,10 +1671,10 @@ async function revalidateMissingOrders(missingOrders) {
         rawApiOrder = apiOrders.find(o =>
           normalizeOrderCode(o.OrderCode) === normalizedCode
         ) || apiOrders[0];
-        freshApiOrder = mapCommandCloudOrderToComparisonFormat(rawApiOrder);
+        freshApiOrder = mapConcreteGoOrderToComparisonFormat(rawApiOrder);
       }
     } catch (queryError) {
-      console.warn(`⚠️ Failed to query Command Cloud for missing order ${orderCode}: ${queryError.message}`);
+      console.warn(`⚠️ Failed to query ConcreteGo for missing order ${orderCode}: ${queryError.message}`);
       stillMissingCount++;
       revalidatedOrders.push({
         order_code: orderCode,
@@ -1676,7 +1690,7 @@ async function revalidateMissingOrders(missingOrders) {
     }
 
     if (!freshApiOrder || !rawApiOrder) {
-      // Not found in Command Cloud API either
+      // Not found in ConcreteGo API either
       stillMissingCount++;
       revalidatedOrders.push({
         order_code: orderCode,
@@ -1687,11 +1701,11 @@ async function revalidateMissingOrders(missingOrders) {
         api_found: false,
         scraped_order: ext
       });
-      console.log(`  ❌ Missing order ${orderCode} (${orderDate}) - NOT found in Command Cloud API`);
+      console.log(`  ❌ Missing order ${orderCode} (${orderDate}) - NOT found in ConcreteGo API`);
       continue;
     }
 
-    // Found in Command Cloud API - mark as resolved
+    // Found in ConcreteGo API - mark as resolved
     resolvedCount++;
     revalidatedOrders.push({
       order_code: orderCode,
@@ -1704,7 +1718,7 @@ async function revalidateMissingOrders(missingOrders) {
       api_order: freshApiOrder,
       raw_api_order: rawApiOrder
     });
-    console.log(`  ✅ Missing order ${orderCode} (${orderDate}) - FOUND in Command Cloud API → resolved`);
+    console.log(`  ✅ Missing order ${orderCode} (${orderDate}) - FOUND in ConcreteGo API → resolved`);
   }
 
   console.log(`🔄 Missing order re-validation complete: ${resolvedCount} resolved, ${stillMissingCount} still missing`);

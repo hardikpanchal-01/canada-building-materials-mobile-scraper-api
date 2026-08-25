@@ -782,7 +782,13 @@ async function getTicketsByOrderId(req, res) {
       });
     }
 
-    const orderId = order_id;
+    const orderId = parseInt(order_id, 10);
+    if (isNaN(orderId)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Order ID must be a valid number'
+      });
+    }
 
     const tz = req.user?.timezone || null;
     const result = await ticketService.getTicketsByOrderId(orderId, {
@@ -820,7 +826,10 @@ async function getTicketsByOrderId(req, res) {
  */
 async function fetchTicketWeather(req, res) {
   try {
-    const ticketId = req.params.ticketId;
+    const ticketId = parseInt(req.params.ticketId, 10);
+    if (isNaN(ticketId)) {
+      return res.status(400).json({ success: false, message: 'Invalid ticket ID' });
+    }
 
     const forceRefresh = req.body?.force_refresh === true;
 
@@ -849,7 +858,10 @@ async function fetchTicketWeather(req, res) {
  */
 async function calculateTicketETA(req, res) {
   try {
-    const ticketId = req.params.ticketId;
+    const ticketId = parseInt(req.params.ticketId, 10);
+    if (isNaN(ticketId)) {
+      return res.status(400).json({ success: false, message: 'Invalid ticket ID' });
+    }
 
     const { truckSpecs, optimizeFor, avoid, forceRecalculate } = req.body || {};
 
@@ -882,7 +894,10 @@ async function calculateTicketETA(req, res) {
  */
 async function getTicketETA(req, res) {
   try {
-    const ticketId = req.params.ticketId;
+    const ticketId = parseInt(req.params.ticketId, 10);
+    if (isNaN(ticketId)) {
+      return res.status(400).json({ success: false, message: 'Invalid ticket ID' });
+    }
 
     const result = await ticketService.getTicketETAById(ticketId);
     if (!result) {

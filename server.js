@@ -1,24 +1,11 @@
-// Polyfill global WebSocket for Node < 22 (required by @db/realtime-js,
-// which throws at client construction when no WebSocket constructor exists).
-// No-op on Node 22+ where WebSocket is built in. Must run before any require
-// that creates a the database client.
-if (typeof globalThis.WebSocket === 'undefined') {
-  try {
-    globalThis.WebSocket = require('ws');
-  } catch (e) {
-    console.warn('⚠️  ws package not available for WebSocket polyfill:', e.message);
-  }
-}
-
 const app = require('./app');
-const { getDb } = require('./src/config/database');
 const { testConnection, closePool } = require('./src/services/database/postgresClient');
 const { runWorkerLoop } = require('./src/services/queueProcessorService');
 const {
   startChatRealtimeListener,
   stopChatRealtimeListener,
 } = require('./src/services/chatRealtimeListener');
-const { startPlantWeatherWorker } = require('./src/workers/plantWeatherWorker');
+const { initRealtime } = require('./src/services/realtimeService');
 
 const PORT = process.env.PORT || 3000;
 
@@ -45,18 +32,6 @@ process.on('unhandledRejection', (reason, promise) => {
 
 // Test database connections
 async function testConnections() {
-  // Test the database connection
-  try {
-    const db = getDb();
-    console.log('✓ Database client initialized successfully');
-  } catch (err) {
-    if (err.message.includes('not configured')) {
-      console.log('⚠️  Database not configured - server will start but database features will be unavailable');
-    } else {
-      console.log('⚠️  Database initialization failed:', err.message);
-    }
-  }
-
   // Test PostgreSQL connection (if configured)
   if (process.env.DATABASE_URL) {
     try {
@@ -104,7 +79,7 @@ const server = app.listen(PORT, async () => {
   console.log('🔧 Scraper API:');
   console.log(`   POST http://localhost:${PORT}/api/scraped-orders/ingest`);
   console.log('═══════════════════════════════════════════════════════');
-  
+
   await testConnections();
 
   // Start embedded worker if --worker flag is passed
@@ -115,19 +90,26 @@ const server = app.listen(PORT, async () => {
     console.log(`   Polling every ${WORKER_POLL_INTERVAL}ms`);
   }
 
-  // Start the chat realtime listener (the database realtime → FCM fan-out).
+  // Start the chat realtime listener (PostgreSQL LISTEN → FCM fan-out).
   // Runs on every dyno; cheap (just websocket subscriptions).
-  try {
-    startChatRealtimeListener();
-  } catch (err) {
-    console.error('❌ Failed to start chat realtime listener:', err.message);
-  }
+  // Skip in local dev when DISABLE_REALTIME=true (persistent PG connections
+  // are incompatible with kubectl port-forward which dies after each connection).
+  if (process.env.DISABLE_REALTIME === 'true') {
+    console.log('⏭️  Realtime listeners disabled (DISABLE_REALTIME=true)');
+  } else {
+    try {
+      startChatRealtimeListener();
+    } catch (err) {
+      console.error('❌ Failed to start chat realtime listener:', err.message);
+    }
 
-  // Start plant weather worker (fetches weather every 30 min for all plants)
-  try {
-    startPlantWeatherWorker();
-  } catch (err) {
-    console.error('❌ Failed to start plant weather worker:', err.message);
+    // Start PostgreSQL LISTEN/NOTIFY → Socket.io realtime
+    try {
+      await initRealtime(server);
+      console.log('🔌 Realtime (PG LISTEN/NOTIFY + Socket.io) started');
+    } catch (err) {
+      console.error('⚠️  Realtime init failed:', err.message);
+    }
   }
 
   console.log('✅ Server ready to accept connections');
@@ -193,4 +175,3 @@ server.on('error', (error) => {
       throw error;
   }
 });
-

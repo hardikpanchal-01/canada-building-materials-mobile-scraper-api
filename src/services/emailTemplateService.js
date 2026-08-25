@@ -1,4 +1,4 @@
-const { getDbAdmin } = require('../config/database');
+const { executeDirectSQL } = require('../utils/postgresExecutor');
 
 // =============================================================================
 // Static default template definitions
@@ -50,70 +50,76 @@ const DEFAULT_TEMPLATES = [
 
 // Fetch all email templates ordered by template_key
 async function getEmailTemplates() {
-  const db = getDbAdmin();
-  const { data, error } = await db
-    .from('email_templates')
-    .select('*')
-    .order('template_key', { ascending: true });
-
-  if (error) throw new Error(`Failed to fetch email templates: ${error.message}`);
-  return data || [];
+  try {
+    const result = await executeDirectSQL(
+      'SELECT * FROM email_templates ORDER BY template_key ASC'
+    );
+    return result.data || [];
+  } catch (error) {
+    throw new Error(`Failed to fetch email templates: ${error.message}`);
+  }
 }
 
 // Fetch a single email template by id
 async function getEmailTemplateById(id) {
-  const db = getDbAdmin();
-  const { data, error } = await db
-    .from('email_templates')
-    .select('*')
-    .eq('id', id)
-    .single();
-
-  if (error) throw new Error(`Email template not found: ${error.message}`);
+  let data;
+  try {
+    const result = await executeDirectSQL(
+      'SELECT * FROM email_templates WHERE id = $1 LIMIT 1',
+      [id]
+    );
+    data = result.data?.[0] || null;
+  } catch (error) {
+    throw new Error(`Email template not found: ${error.message}`);
+  }
+  if (!data) throw new Error('Email template not found: no rows returned');
   return data;
 }
 
 // Fetch an active email template by template_key
 async function getEmailTemplateByKey(templateKey) {
-  const db = getDbAdmin();
-  const { data, error } = await db
-    .from('email_templates')
-    .select('*')
-    .eq('template_key', templateKey)
-    .eq('is_active', true)
-    .single();
-
-  if (error) throw new Error(`Email template not found for key "${templateKey}": ${error.message}`);
+  let data;
+  try {
+    const result = await executeDirectSQL(
+      'SELECT * FROM email_templates WHERE template_key = $1 AND is_active = true LIMIT 1',
+      [templateKey]
+    );
+    data = result.data?.[0] || null;
+  } catch (error) {
+    throw new Error(`Email template not found for key "${templateKey}": ${error.message}`);
+  }
+  if (!data) throw new Error(`Email template not found for key "${templateKey}": no rows returned`);
   return data;
 }
 
 // Create a new email template
 async function createEmailTemplate(input) {
-  const db = getDbAdmin();
-  const { data, error } = await db
-    .from('email_templates')
-    .insert({
-      template_key: input.template_key,
-      name: input.name,
-      subject: input.subject,
-      body_content: input.body_content || '',
-      font_family: input.font_family || 'Arial, Helvetica, sans-serif',
-      font_size: input.font_size || '14px',
-      footer_text: input.footer_text || 'This is an automated notification...',
-      is_active: input.is_active !== undefined ? input.is_active : true,
-      tenant_id: input.tenant_id || null,
-    })
-    .select()
-    .single();
-
-  if (error) throw new Error(`Failed to create email template: ${error.message}`);
-  return data;
+  try {
+    const result = await executeDirectSQL(
+      `INSERT INTO email_templates
+         (template_key, name, subject, body_content, font_family, font_size, footer_text, is_active, tenant_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       RETURNING *`,
+      [
+        input.template_key,
+        input.name,
+        input.subject,
+        input.body_content || '',
+        input.font_family || 'Arial, Helvetica, sans-serif',
+        input.font_size || '14px',
+        input.footer_text || 'This is an automated notification...',
+        input.is_active !== undefined ? input.is_active : true,
+        input.tenant_id || null,
+      ]
+    );
+    return result.data?.[0];
+  } catch (error) {
+    throw new Error(`Failed to create email template: ${error.message}`);
+  }
 }
 
 // Update an existing email template
 async function updateEmailTemplate(id, input) {
-  const db = getDbAdmin();
-
   const updatePayload = { updated_at: new Date().toISOString() };
 
   if (input.template_key !== undefined) updatePayload.template_key = input.template_key;
@@ -126,26 +132,32 @@ async function updateEmailTemplate(id, input) {
   if (input.is_active !== undefined) updatePayload.is_active = input.is_active;
   if (input.tenant_id !== undefined) updatePayload.tenant_id = input.tenant_id;
 
-  const { data, error } = await db
-    .from('email_templates')
-    .update(updatePayload)
-    .eq('id', id)
-    .select()
-    .single();
+  const columns = Object.keys(updatePayload);
+  const setClauses = columns.map((col, i) => `"${col}" = $${i + 1}`);
+  const params = columns.map(col => updatePayload[col]);
+  params.push(id);
 
-  if (error) throw new Error(`Failed to update email template: ${error.message}`);
+  let data;
+  try {
+    const result = await executeDirectSQL(
+      `UPDATE email_templates SET ${setClauses.join(', ')} WHERE id = $${params.length} RETURNING *`,
+      params
+    );
+    data = result.data?.[0] || null;
+  } catch (error) {
+    throw new Error(`Failed to update email template: ${error.message}`);
+  }
+  if (!data) throw new Error('Failed to update email template: no rows returned');
   return data;
 }
 
 // Delete an email template by id
 async function deleteEmailTemplate(id) {
-  const db = getDbAdmin();
-  const { error } = await db
-    .from('email_templates')
-    .delete()
-    .eq('id', id);
-
-  if (error) throw new Error(`Failed to delete email template: ${error.message}`);
+  try {
+    await executeDirectSQL('DELETE FROM email_templates WHERE id = $1', [id]);
+  } catch (error) {
+    throw new Error(`Failed to delete email template: ${error.message}`);
+  }
   return { id };
 }
 

@@ -7,8 +7,28 @@
  * - Validate client credentials for code exchange
  */
 
-const { getAuthDbAdmin } = require('../config/authDatabase');
+const { executeAuthSQL } = require('../config/authPostgres');
 const { decrypt, secureCompare } = require('../utils/encryptionUtils');
+
+/**
+ * Query public.tenants directly in PostgreSQL.
+ * @param {string} columns - Column list ('*' or comma-separated)
+ * @param {string} whereColumn - Column for the equality filter
+ * @param {*} value - Filter value
+ * @returns {{row: Object|null, error: Error|null}} Distinguishes "not found" from query failure
+ */
+async function fetchTenantRowSQL(columns, whereColumn, value) {
+  try {
+    const result = await executeAuthSQL(
+      `SELECT ${columns} FROM public.tenants
+       WHERE ${whereColumn} = $1 AND deleted_at IS NULL LIMIT 1`,
+      [value]
+    );
+    return { row: result.data.length > 0 ? result.data[0] : null, error: null };
+  } catch (error) {
+    return { row: null, error };
+  }
+}
 
 // In-memory cache for tenant lookups by subdomain (10-minute TTL)
 // Tenant config rarely changes; mobile apps call this on every login screen load.
@@ -30,28 +50,23 @@ async function getTenantBySubdomain(subdomain) {
     return cached.data;
   }
 
-  const db = getAuthDbAdmin();
-
-  const { data, error } = await db
-    .schema('auth_tenant')
-    .from('tenants')
-    .select('id, uuid, name, subdomain, redirect_url, client_id, status, settings')
-    .eq('subdomain', normalizedSubdomain)
-    .is('deleted_at', null)
-    .limit(1);
+  const { row, error } = await fetchTenantRowSQL(
+    'id, uuid, name, subdomain, redirect_url, client_id, status, settings',
+    'subdomain', normalizedSubdomain
+  );
 
   if (error) {
     console.log('[TenantService] getTenantBySubdomain error:', error.message);
     return null;
   }
 
-  if (!data || data.length === 0) {
+  if (!row) {
     // Cache null results too (prevents repeated DB hits for invalid subdomains)
     _tenantCache.set(normalizedSubdomain, { data: null, timestamp: Date.now() });
     return null;
   }
 
-  const tenant = data[0];
+  const tenant = row;
   const result = {
     id: tenant.id,
     uuid: tenant.uuid,
@@ -73,22 +88,12 @@ async function getTenantBySubdomain(subdomain) {
  * @returns {Object|null} Full tenant data
  */
 async function getTenantById(tenantId) {
-  const db = getAuthDbAdmin();
-
-  const { data, error } = await db
-    .schema('auth_tenant')
-    .from('tenants')
-    .select('*')
-    .eq('id', tenantId)
-    .is('deleted_at', null)
-    .limit(1);
-
+  const { row, error } = await fetchTenantRowSQL('*', 'id', tenantId);
   if (error) {
     console.log('[TenantService] getTenantById error:', error.message);
     return null;
   }
-
-  return data && data.length > 0 ? data[0] : null;
+  return row;
 }
 
 /**
@@ -97,26 +102,16 @@ async function getTenantById(tenantId) {
  * @returns {Object|null} Tenant data with decrypted secrets
  */
 async function getTenantByClientId(clientId) {
-  const db = getAuthDbAdmin();
-
-  const { data, error } = await db
-    .schema('auth_tenant')
-    .from('tenants')
-    .select('*')
-    .eq('client_id', clientId)
-    .is('deleted_at', null)
-    .limit(1);
-
+  const { row, error } = await fetchTenantRowSQL('*', 'client_id', clientId);
   if (error) {
     console.log('[TenantService] getTenantByClientId error:', error.message);
     return null;
   }
-
-  if (!data || data.length === 0) {
+  if (!row) {
     return null;
   }
 
-  const tenant = data[0];
+  const tenant = row;
 
   // Decrypt sensitive fields
   let decryptedData = { ...tenant };
@@ -195,9 +190,34 @@ async function validateClientCredentials(clientId, clientSecret) {
   };
 }
 
+/**
+ * Get tenant's credentials (decrypted)
+ * Used to authenticate against tenant's instance
+ * @param {number} tenantId - Tenant ID
+ * @returns {Object|null} Decrypted credentials
+ */
+async function getTenantCredentials(tenantId) {
+  const { row, error } = await fetchTenantRowSQL(
+    'id',
+    'id', tenantId
+  );
+  if (error) {
+    console.log('[TenantService] getTenantCredentials error:', error.message);
+    return null;
+  }
+  if (!row) {
+    return null;
+  }
+
+  const tenant = row;
+
+  return {};
+}
+
 module.exports = {
   getTenantBySubdomain,
   getTenantById,
   getTenantByClientId,
   validateClientCredentials,
+  getTenantCredentials
 };

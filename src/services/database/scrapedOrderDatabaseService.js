@@ -2,12 +2,12 @@
  * Scraped Order Database Service
  *
  * Handles storage and database operations for scraped orders.
- * - Uploads validated orders to object storage
+ * - Uploads validated orders to S3 storage
  * - Creates tracking records in PostgreSQL
  */
 
 const crypto = require('crypto');
-const { uploadToStorage } = require('./storageClient');
+const { uploadToStorage } = require('./s3Storage');
 const { executeDirectSQL } = require('../../utils/postgresExecutor');
 
 /**
@@ -65,7 +65,7 @@ async function storeScrapedOrders({
     orders: orders
   };
 
-  // Step 1: Upload to storage
+  // Step 1: Upload to S3 storage
   let filePath, fileUrl;
   try {
     const uploadResult = await uploadToStorage(fileName, storageData);

@@ -63,7 +63,7 @@ const qrService = require('../services/qrService');
  *                     security_mode:
  *                       type: object
  *                       nullable: true
- *                       description: Tenant security policy JSON from `auth_tenant.tenants.security_mode`
+ *                       description: Tenant security policy JSON from `public.tenants.security_mode`
  *                       example:
  *                         mode: time_bound
  *                         scannable_statuses: [Loaded, To job]

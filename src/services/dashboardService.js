@@ -47,10 +47,11 @@ async function getDashboardData(userId, userAccess = null, pagination = {}, user
       return cached.data;
     }
     // Get user profile and exclusion patterns in parallel.
-    // affects_counts=true subset so dashboard counts align with web summary.
+    // Full active pattern set so dashboard counts match web RPC
+    // get_orders_summary (which ignores affects_counts post-2026-05-11).
     const [userProfile, exclusionPatterns] = await Promise.all([
       getUserProfile(userId, userEmail),
-      fetchExclusionPatterns({ affectsCountsOnly: true })
+      fetchExclusionPatterns()
     ]);
 
     // Get today's date in the user's timezone (from mobile app or tenant setting)
