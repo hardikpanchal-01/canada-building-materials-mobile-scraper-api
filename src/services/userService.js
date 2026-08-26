@@ -1,5 +1,5 @@
-const { getSupabase, getSupabaseAdmin } = require('../config/database');
-const { uploadAvatarToStorage, deleteAvatarFromStorage, AVATARS_BUCKET } = require('./database/supabaseClient');
+const { getDb, getDbAdmin } = require('../config/database');
+const { uploadAvatarToStorage, deleteAvatarFromStorage, AVATARS_BUCKET } = require('./database/storageClient');
 
 // In-memory user profile cache (2-minute TTL)
 // getUserProfile is called on every authenticated request via dashboard/controllers
@@ -21,18 +21,18 @@ function _invalidateProfileCache(userId) {
 }
 
 /**
- * Get user email from auth.users via Supabase Auth (fallback if not in JWT)
+ * Get user email from auth.users via Postgres Auth (fallback if not in JWT)
  * @param {string} userId - User ID (UUID)
  * @returns {string|null} User email
  */
 async function getUserEmailFromAuth(userId) {
   try {
     // Use admin client for auth admin operations
-    const supabase = getSupabaseAdmin();
+    const dbClient = getDbAdmin();
     
     // Try using admin API (requires service role key)
     try {
-      const { data: { user }, error } = await supabase.auth.admin.getUserById(userId);
+      const { data: { user }, error } = await dbClient.auth.admin.getUserById(userId);
       if (!error && user && user.email) {
         return user.email;
       }
@@ -58,10 +58,10 @@ async function getUserEmailFromAuth(userId) {
 async function createUserProfile(userId, email) {
   try {
     // Use admin client to bypass RLS policies for user creation
-    const supabase = getSupabaseAdmin();
+    const dbClient = getDbAdmin();
     
     // First, check if user already exists (race condition protection)
-    const { data: existingUser } = await supabase
+    const { data: existingUser } = await dbClient
       .from('users')
       .select('*')
       .eq('id', userId)
@@ -89,7 +89,7 @@ async function createUserProfile(userId, email) {
       phone_country_code: null
     };
 
-    const { data, error } = await supabase
+    const { data, error } = await dbClient
       .from('users')
       .insert(newUser)
       .select()
@@ -99,7 +99,7 @@ async function createUserProfile(userId, email) {
       // If duplicate key error, user was created between check and insert - fetch it
       if (error.code === '23505' || error.message.includes('duplicate key') || error.message.includes('unique constraint')) {
         // Try by ID first, then by email (email unique constraint means another ID has this email)
-        const { data: existingById } = await supabase
+        const { data: existingById } = await dbClient
           .from('users')
           .select('*')
           .eq('id', userId)
@@ -110,7 +110,7 @@ async function createUserProfile(userId, email) {
         }
 
         if (email) {
-          const { data: existingByEmail } = await supabase
+          const { data: existingByEmail } = await dbClient
             .from('users')
             .select('*')
             .eq('email', email)
@@ -137,9 +137,9 @@ async function createUserProfile(userId, email) {
  */
 async function getUserCompany(userId) {
   try {
-    const supabase = getSupabase();
+    const dbClient = getDb();
 
-    const { data, error } = await supabase
+    const { data, error } = await dbClient
       .from('user_customers')
       .select('customer_id, customers(id, name)')
       .eq('user_id', userId)
@@ -171,9 +171,9 @@ async function getUserProfile(userId, userEmail = null) {
       return cached.data;
     }
 
-    const supabase = getSupabase();
+    const dbClient = getDb();
 
-    const { data, error } = await supabase
+    const { data, error } = await dbClient
       .from('users')
       .select('*')
       .eq('id', userId)
@@ -193,14 +193,14 @@ async function getUserProfile(userId, userEmail = null) {
       }
 
       if (email) {
-        const { data: existingByEmail } = await supabase
+        const { data: existingByEmail } = await dbClient
           .from('users')
           .select('*')
           .eq('email', email)
           .single();
 
         if (existingByEmail) {
-          // User exists with a different ID (old Supabase auth vs new central auth)
+          // User exists with a different ID (old Postgres auth vs new central auth)
           // Return existing profile as-is — cannot update users.id due to FK constraints from user_roles/user_customers
           console.log(`User found by email ${email} with old ID ${existingByEmail.id} (new auth ID: ${userId})`);
           const company = await getUserCompany(existingByEmail.id);
@@ -283,7 +283,7 @@ function formatUserProfile(data, company = null) {
 async function updateUserProfile(userId, profileData, userEmail = null) {
   try {
     // Use admin client to bypass RLS policies for updates
-    const supabase = getSupabaseAdmin();
+    const dbClient = getDbAdmin();
 
     // Ensure user profile exists before updating
     let currentProfile;
@@ -373,7 +373,7 @@ async function updateUserProfile(userId, profileData, userEmail = null) {
     // matched by email in getUserProfile(); updating by the central userId matches 0
     // rows → PostgREST "Cannot coerce the result to a single JSON object".
     const targetUserId = currentProfile?.id || userId;
-    const { data, error } = await supabase
+    const { data, error } = await dbClient
       .from('users')
       .update(updateData)
       .eq('id', targetUserId)
@@ -381,7 +381,7 @@ async function updateUserProfile(userId, profileData, userEmail = null) {
       .single();
 
     if (error) {
-      console.error('Supabase update error:', error);
+      console.error('Postgres update error:', error);
       throw new Error(error.message || 'Failed to update user profile');
     }
 
@@ -405,9 +405,9 @@ async function updateUserProfile(userId, profileData, userEmail = null) {
  */
 async function userExists(userId) {
   try {
-    const supabase = getSupabase();
+    const dbClient = getDb();
     
-    const { data, error } = await supabase
+    const { data, error } = await dbClient
       .from('users')
       .select('id')
       .eq('id', userId)
@@ -436,22 +436,22 @@ async function userExists(userId) {
  * via central auth carry a different public.users id (matched by email), so callers
  * must not assume req.user.id === public.users.id. Falls back to userId.
  */
-async function resolveUserRowId(supabase, userId, userEmail = null) {
-  const byId = await supabase.from('users').select('id').eq('id', userId).maybeSingle();
+async function resolveUserRowId(dbClient, userId, userEmail = null) {
+  const byId = await dbClient.from('users').select('id').eq('id', userId).maybeSingle();
   if (byId.data) return byId.data.id;
   if (userEmail) {
-    const byEmail = await supabase.from('users').select('id').eq('email', userEmail).maybeSingle();
+    const byEmail = await dbClient.from('users').select('id').eq('email', userEmail).maybeSingle();
     if (byEmail.data) return byEmail.data.id;
   }
   return userId;
 }
 
 async function uploadUserAvatar(userId, fileBuffer, mimeType, originalName, userEmail = null) {
-  const supabase = getSupabaseAdmin();
-  const rowId = await resolveUserRowId(supabase, userId, userEmail);
+  const dbClient = getDbAdmin();
+  const rowId = await resolveUserRowId(dbClient, userId, userEmail);
 
   // Get current avatar URL to clean up old file
-  const { data: currentUser } = await supabase
+  const { data: currentUser } = await dbClient
     .from('users')
     .select('avatar_url')
     .eq('id', rowId)
@@ -474,7 +474,7 @@ async function uploadUserAvatar(userId, fileBuffer, mimeType, originalName, user
   const { publicUrl } = await uploadAvatarToStorage(rowId, fileBuffer, mimeType, originalName);
 
   // Update avatar_url in the users table
-  const { data, error } = await supabase
+  const { data, error } = await dbClient
     .from('users')
     .update({ avatar_url: publicUrl, updated_at: new Date().toISOString() })
     .eq('id', rowId)
@@ -496,11 +496,11 @@ async function uploadUserAvatar(userId, fileBuffer, mimeType, originalName, user
  * @returns {Object} Updated user profile
  */
 async function removeUserAvatar(userId, userEmail = null) {
-  const supabase = getSupabaseAdmin();
-  const rowId = await resolveUserRowId(supabase, userId, userEmail);
+  const dbClient = getDbAdmin();
+  const rowId = await resolveUserRowId(dbClient, userId, userEmail);
 
   // Get current avatar URL
-  const { data: currentUser } = await supabase
+  const { data: currentUser } = await dbClient
     .from('users')
     .select('avatar_url')
     .eq('id', rowId)
@@ -519,7 +519,7 @@ async function removeUserAvatar(userId, userEmail = null) {
   }
 
   // Clear avatar_url in database
-  const { data, error } = await supabase
+  const { data, error } = await dbClient
     .from('users')
     .update({ avatar_url: null, updated_at: new Date().toISOString() })
     .eq('id', rowId)

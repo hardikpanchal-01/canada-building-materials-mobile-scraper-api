@@ -1,6 +1,6 @@
 const orderRequestService = require('../services/orderRequestService');
 const { sendOrderStatusEmail, sendOrderCreatedEmail, sendOrderUpdatedEmail } = require('../services/orderRequestEmailService');
-const { getSupabaseAdmin } = require('../config/database');
+const { getDbAdmin } = require('../config/database');
 const { getTenantShowRegionForUser, resolveEffectiveUserId } = require('../middleware/auth');
 
 /**
@@ -106,13 +106,13 @@ async function createOrderRequest(req, res) {
     // Send email notification to creator (non-blocking)
     (async () => {
       try {
-        const supabase = getSupabaseAdmin();
+        const dbClient = getDbAdmin();
         const order = await orderRequestService.getOrderRequestById(data.id);
         if (!order) return;
 
         const showRegion = await getTenantShowRegionForUser(userId);
 
-        const { data: creator } = await supabase
+        const { data: creator } = await dbClient
           .from('users')
           .select('email, full_name')
           .eq('id', userId)
@@ -153,7 +153,7 @@ async function updateOrderRequest(req, res) {
     // Send update email notification (non-blocking)
     (async () => {
       try {
-        const supabase = getSupabaseAdmin();
+        const dbClient = getDbAdmin();
         const order = await orderRequestService.getOrderRequestById(id);
         if (!order) return;
 
@@ -161,7 +161,7 @@ async function updateOrderRequest(req, res) {
 
         // Collect recipient IDs: updater + original creator (deduplicated)
         const recipientIds = [...new Set([updaterUserId, order.user_id].filter(Boolean))];
-        const { data: users } = await supabase
+        const { data: users } = await dbClient
           .from('users')
           .select('id, email, full_name')
           .in('id', recipientIds);
@@ -210,11 +210,11 @@ async function updateOrderRequestStatus(req, res) {
     if (status === 'approved' || status === 'rejected') {
       (async () => {
         try {
-          const supabase = getSupabaseAdmin();
+          const dbClient = getDbAdmin();
           const order = await orderRequestService.getOrderRequestById(id);
           if (!order || !order.user_id) return;
 
-          const { data: creator } = await supabase
+          const { data: creator } = await dbClient
             .from('users')
             .select('email, full_name')
             .eq('id', order.user_id)

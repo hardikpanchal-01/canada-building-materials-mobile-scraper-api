@@ -1,4 +1,4 @@
-const { getSupabaseAdmin } = require('../config/database');
+const { getDbAdmin } = require('../config/database');
 
 /**
  * Get plant_ids for a user based on their roles
@@ -7,10 +7,10 @@ const { getSupabaseAdmin } = require('../config/database');
  * @returns {Array<number>} Array of plant_ids the user has access to
  */
 async function getUserPlantIds(userId) {
-  const supabase = getSupabaseAdmin();
+  const dbClient = getDbAdmin();
 
   // Get role_ids for the user from user_roles table
-  const { data: userRoles, error: userRolesError } = await supabase
+  const { data: userRoles, error: userRolesError } = await dbClient
     .from('user_roles')
     .select('role_id')
     .eq('user_id', userId);
@@ -24,7 +24,7 @@ async function getUserPlantIds(userId) {
   const roleIds = userRoles.map(ur => ur.role_id);
 
   // Get plant_ids for those roles from role_plants table
-  const { data: rolePlants, error: rolePlantsError } = await supabase
+  const { data: rolePlants, error: rolePlantsError } = await dbClient
     .from('role_plants')
     .select('plant_id')
     .in('role_id', roleIds);
@@ -51,7 +51,7 @@ async function getUserPlantIds(userId) {
  * @returns {Object} { announcements, total, page, limit, totalPages, userPlantIds }
  */
 async function getAnnouncementsForUser(userId, filters = {}, page = 1, limit = 50) {
-  const supabase = getSupabaseAdmin();
+  const dbClient = getDbAdmin();
 
   // Get user's plant_ids
   const userPlantIds = await getUserPlantIds(userId);
@@ -73,7 +73,7 @@ async function getAnnouncementsForUser(userId, filters = {}, page = 1, limit = 5
 
   // Build query for published announcements
   // that have at least one plant_id matching user's plant_ids
-  let query = supabase
+  let query = dbClient
     .from('announcements')
     .select('*', { count: 'exact' })
     .eq('published', true)
@@ -119,12 +119,12 @@ async function getAnnouncementsForUser(userId, filters = {}, page = 1, limit = 5
  * @returns {Object} { announcements, total, page, limit, totalPages }
  */
 async function getAnnouncements(filters = {}, page = 1, limit = 50) {
-  const supabase = getSupabaseAdmin();
+  const dbClient = getDbAdmin();
 
   const from = (page - 1) * limit;
   const to = from + limit - 1;
 
-  let query = supabase
+  let query = dbClient
     .from('announcements')
     .select('*', { count: 'exact' });
 
@@ -168,9 +168,9 @@ async function getAnnouncements(filters = {}, page = 1, limit = 50) {
  * @returns {Object} Announcement object
  */
 async function getAnnouncementById(id) {
-  const supabase = getSupabaseAdmin();
+  const dbClient = getDbAdmin();
 
-  const { data, error } = await supabase
+  const { data, error } = await dbClient
     .from('announcements')
     .select('*')
     .eq('id', id)
@@ -192,9 +192,9 @@ async function getAnnouncementById(id) {
  * @returns {Object} Created announcement
  */
 async function createAnnouncement(announcementData) {
-  const supabase = getSupabaseAdmin();
+  const dbClient = getDbAdmin();
 
-  const { data, error } = await supabase
+  const { data, error } = await dbClient
     .from('announcements')
     .insert([announcementData])
     .select()
@@ -212,9 +212,9 @@ async function createAnnouncement(announcementData) {
  * @returns {Object} Updated announcement
  */
 async function updateAnnouncement(id, announcementData) {
-  const supabase = getSupabaseAdmin();
+  const dbClient = getDbAdmin();
 
-  const { data, error } = await supabase
+  const { data, error } = await dbClient
     .from('announcements')
     .update(announcementData)
     .eq('id', id)
@@ -237,9 +237,9 @@ async function updateAnnouncement(id, announcementData) {
  * @returns {boolean} True if deleted successfully
  */
 async function deleteAnnouncement(id) {
-  const supabase = getSupabaseAdmin();
+  const dbClient = getDbAdmin();
 
-  const { error } = await supabase
+  const { error } = await dbClient
     .from('announcements')
     .delete()
     .eq('id', id);

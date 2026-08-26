@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { authenticate, invalidateTzPrefCache } = require('../middleware/auth');
-const { getSupabaseAdmin } = require('../config/database');
+const { getDbAdmin } = require('../config/database');
 
 /**
  * @route   GET /api/user-preferences/:key
@@ -17,8 +17,8 @@ router.get('/:key', authenticate, async (req, res) => {
     const userId = req.user.id;
     const { key } = req.params;
 
-    const supabase = getSupabaseAdmin();
-    const { data, error } = await supabase
+    const dbClient = getDbAdmin();
+    const { data, error } = await dbClient
       .from('user_preferences')
       .select('preference_value')
       .eq('user_id', userId)
@@ -59,8 +59,8 @@ router.put('/:key', authenticate, async (req, res) => {
       return res.status(400).json({ success: false, message: 'value is required' });
     }
 
-    const supabase = getSupabaseAdmin();
-    const { data, error } = await supabase
+    const dbClient = getDbAdmin();
+    const { data, error } = await dbClient
       .from('user_preferences')
       .upsert({
         user_id: userId,

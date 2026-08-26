@@ -26,7 +26,7 @@ async function handlePushFailures(responses) {
  *     summary: Send push notification to device(s) or user
  *     description: |
  *       Sends a push notification to one or more devices using Firebase Cloud Messaging (FCM).
- *       Device tokens are looked up from the **notification Supabase** database.
+ *       Device tokens are looked up from the **notification Postgres** database.
  *
  *       **Authentication:** Requires a valid JWT token in the `Authorization: Bearer <token>` header.
  *

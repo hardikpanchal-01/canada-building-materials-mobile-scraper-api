@@ -17,7 +17,7 @@
     "truckast",
     "mobile-backend",
     "scraper",
-    "supabase"
+    "postgres"
   ],
   "author": "",
   "license": "ISC",
@@ -29,7 +29,6 @@
     "@ai-sdk/azure": "^3.0.70",
     "@ai-sdk/google": "^3.0.80",
     "@anthropic-ai/sdk": "^0.90.0",
-    "@supabase/supabase-js": "^2.89.0",
     "ai": "^6.0.198",
     "axios": "^1.13.5",
     "bcryptjs": "^3.0.3",

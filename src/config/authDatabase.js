@@ -1,72 +1,39 @@
 /**
- * Auth Supabase Database Configuration
+ * Central-auth data client (schema `auth_tenant`).
  *
- * Separate Supabase instance for authentication operations.
- * Uses auth_tenant schema for tenants, users, auth_codes, etc.
+ * The `auth_tenant` tables (tenants, users, tenant_users, auth_codes, …) live in
+ * the SHARED central-auth database — a different cluster from the tenant's own
+ * database. Table CRUD runs on DIRECT Postgres via a dedicated central-auth pool
+ * (CENTRAL_AUTH_DATABASE_URL). Database functions (.rpc) are served by the thin
+ * fetch client against the auth gateway (AUTH_SUPABASE_URL).
+ *
+ * getAuthDbAdmin() keeps its name, its default `auth_tenant` schema and
+ * its `{ data, error }` contract, so the 8 call sites are unchanged. Callers
+ * still write `.schema('auth_tenant').from(...)`, which is a no-op re-selection
+ * of the already-default schema.
  */
 
-const { createClient } = require('@supabase/supabase-js');
+const { makeClient } = require('../db/client');
 
-// Auth Supabase configuration (separate from main app database)
-const authSupabaseUrl = process.env.AUTH_SUPABASE_URL;
-const authSupabaseAnonKey = process.env.AUTH_SUPABASE_ANON_KEY;
-const authSupabaseServiceKey = process.env.AUTH_SUPABASE_SERVICE_KEY;
+const AUTH_REST_URL = process.env.AUTH_SUPABASE_URL;
+const AUTH_SERVICE_KEY = process.env.AUTH_SUPABASE_SERVICE_KEY;
+const AUTH_ANON_KEY = process.env.AUTH_SUPABASE_ANON_KEY;
 
-let authSupabase = null; // Regular client (uses anon key, respects RLS)
-let authSupabaseAdmin = null; // Admin client (uses service key, bypasses RLS)
-
-// Initialize regular Auth Supabase client
-if (authSupabaseUrl && authSupabaseAnonKey &&
-    authSupabaseUrl !== 'your_auth_supabase_url' &&
-    authSupabaseAnonKey !== 'your_auth_supabase_anon_key') {
-  authSupabase = createClient(authSupabaseUrl, authSupabaseAnonKey, {
-    db: {
-      schema: 'auth_tenant'
-    }
+// Table access for auth_tenant goes through the auth GATEWAY over PostgREST
+// (dataBackend: 'rest'): the gateway holds the JWT-scoped role that has
+// auth_tenant grants, whereas a direct pool would need those grants granted on
+// the shared central-auth DB. This preserves the exact pre-migration behaviour
+// while using no `@supabase/*` SDK (thin fetch client, see db/restFetch.js).
+function getAuthDbAdmin() {
+  return makeClient({
+    dataBackend: 'rest',
+    schema: 'auth_tenant',
+    restUrl: AUTH_REST_URL,
+    serviceKey: AUTH_SERVICE_KEY,
+    anonKey: AUTH_ANON_KEY,
   });
-} else {
-  console.warn('⚠️  Auth Supabase credentials not configured. Please update your .env file with AUTH_SUPABASE_URL and AUTH_SUPABASE_ANON_KEY.');
-}
-
-// Initialize admin Auth Supabase client (with service key for admin operations)
-if (authSupabaseUrl && authSupabaseServiceKey &&
-    authSupabaseUrl !== 'your_auth_supabase_url' &&
-    authSupabaseServiceKey !== 'your_auth_supabase_service_key') {
-  authSupabaseAdmin = createClient(authSupabaseUrl, authSupabaseServiceKey, {
-    auth: {
-      autoRefreshToken: false,
-      persistSession: false
-    },
-    db: {
-      schema: 'auth_tenant'
-    }
-  });
-} else if (authSupabase) {
-  // Fallback to anon key if service key not available (for development)
-  console.warn('⚠️  AUTH_SUPABASE_SERVICE_KEY not configured. Using anon key for admin operations (may fail with RLS).');
-  authSupabaseAdmin = authSupabase;
-}
-
-/**
- * Get Auth Supabase client (regular, respects RLS)
- * @returns {Object} Supabase client for auth_tenant schema
- * @throws {Error} If not configured
- */
-/**
- * Get Auth Supabase admin client (bypasses RLS)
- * @returns {Object} Supabase admin client for auth_tenant schema
- * @throws {Error} If not configured
- */
-function getAuthSupabaseAdmin() {
-  if (!authSupabaseAdmin) {
-    console.error('[AuthDB] Auth Supabase admin client is not configured!');
-    console.error('[AuthDB] AUTH_SUPABASE_URL:', process.env.AUTH_SUPABASE_URL ? 'SET' : 'NOT SET');
-    console.error('[AuthDB] AUTH_SUPABASE_SERVICE_KEY:', process.env.AUTH_SUPABASE_SERVICE_KEY ? 'SET' : 'NOT SET');
-    throw new Error('Auth Supabase admin client is not configured. Please set AUTH_SUPABASE_SERVICE_KEY in your .env file.');
-  }
-  return authSupabaseAdmin;
 }
 
 module.exports = {
-  getAuthSupabaseAdmin
+  getAuthDbAdmin,
 };

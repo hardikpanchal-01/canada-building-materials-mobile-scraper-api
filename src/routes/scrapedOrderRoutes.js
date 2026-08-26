@@ -30,7 +30,7 @@ const router = express.Router();
  *       1. Validates the request payload structure
  *       2. Validates each order against required fields and format rules
  *       3. Sanitizes and normalizes data (dates, quantities, statuses)
- *       4. Uploads validated orders to Supabase Storage as JSON
+ *       4. Uploads validated orders to Postgres Storage as JSON
  *       5. Creates a tracking record in the database
  *       6. Returns batch ID and file URL for downstream processing
  *     tags: [Scraped Orders]

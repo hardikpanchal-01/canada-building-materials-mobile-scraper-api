@@ -322,7 +322,7 @@ async function updateProfile(req, res) {
  *     summary: Upload profile picture
  *     description: |
  *       Uploads a profile picture for the authenticated user.
- *       The image is stored in a Supabase Storage bucket and the public URL
+ *       The image is stored in a Postgres Storage bucket and the public URL
  *       is saved to the user's `avatar_url` column.
  *
  *       **Accepted formats:** JPEG, PNG, GIF, WebP

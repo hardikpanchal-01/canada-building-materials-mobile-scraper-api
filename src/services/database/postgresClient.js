@@ -23,7 +23,7 @@ if (DATABASE_URL) {
    *
    * Configuration:
    * - max: Maximum number of connections (20)
-   * - idleTimeoutMillis: Close idle connections after 60s (Supabase pooler closes idle conns; we release first to avoid "Connection terminated unexpectedly")
+   * - idleTimeoutMillis: Close idle connections after 60s (Postgres pooler closes idle conns; we release first to avoid "Connection terminated unexpectedly")
    * - connectionTimeoutMillis: Fail connection attempts after 15 seconds
    */
   pool = new Pool({
@@ -33,7 +33,10 @@ if (DATABASE_URL) {
     idleTimeoutMillis: 60000,
     connectionTimeoutMillis: 15000,
     statement_timeout: QUERY_TIMEOUT_MS,  // Kill queries exceeding this time
-    // SSL configuration for Supabase
+    // SSL configuration for Postgres
+    // Host-detection heuristic (a stored VALUE, not an SDK reference): hosted
+    // *.supabase.com poolers need TLS-no-verify; the CNPG/NLB host connects per
+    // its own sslmode. Preserved verbatim so SSL behaviour is byte-identical.
     ssl: DATABASE_URL.includes('supabase') ? { rejectUnauthorized: false } : false
   });
 

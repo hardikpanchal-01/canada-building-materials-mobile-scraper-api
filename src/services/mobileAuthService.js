@@ -8,8 +8,8 @@
  * 4. Exchange code for user information
  */
 
-const { getAuthSupabaseAdmin } = require('../config/authDatabase');
-const { getSupabaseAdmin } = require('../config/database');
+const { getAuthDbAdmin } = require('../config/authDatabase');
+const { getDbAdmin } = require('../config/database');
 const { createAuthCode, consumeAuthCode, CODE_EXPIRY_SECONDS } = require('./authCodeService');
 const { verifyPassword, secureCompare, decryptTenantSecret } = require('../utils/encryptionUtils');
 const { generateAccessToken, generateRefreshToken } = require('../utils/jwtUtils');
@@ -86,11 +86,11 @@ function resolveTenantClientSecret(tenant) {
  * @returns {Object|null} User record
  */
 async function getUserByEmail(email) {
-  const supabase = getAuthSupabaseAdmin();
+  const dbClient = getAuthDbAdmin();
   const normalizedEmail = email.toLowerCase().trim();
 
   // Use .schema('auth_tenant') to explicitly specify the schema
-  const { data, error } = await supabase
+  const { data, error } = await dbClient
     .schema('auth_tenant')
     .from('users')
     .select('*')
@@ -116,9 +116,9 @@ async function getUserByEmail(email) {
  * @returns {Object|null} User record
  */
 async function getUserById(userId) {
-  const supabase = getAuthSupabaseAdmin();
+  const dbClient = getAuthDbAdmin();
 
-  const { data, error } = await supabase
+  const { data, error } = await dbClient
     .schema('auth_tenant')
     .from('users')
     .select('*')
@@ -140,9 +140,9 @@ async function getUserById(userId) {
  * @returns {Object|null} Tenant user record with tenant details
  */
 async function getTenantUser(userId, tenantId = null) {
-  const supabase = getAuthSupabaseAdmin();
+  const dbClient = getAuthDbAdmin();
 
-  let query = supabase
+  let query = dbClient
     .schema('auth_tenant')
     .from('tenant_users')
     .select('*')
@@ -168,10 +168,10 @@ async function getTenantUser(userId, tenantId = null) {
  * @returns {Object|null} Tenant user record with tenant info
  */
 async function getUserTenantWithDetails(userId) {
-  const supabase = getAuthSupabaseAdmin();
+  const dbClient = getAuthDbAdmin();
 
   // Get tenant_user record for this user (active status)
-  const { data: tuData, error: tuError } = await supabase
+  const { data: tuData, error: tuError } = await dbClient
     .schema('auth_tenant')
     .from('tenant_users')
     .select('*')
@@ -190,7 +190,7 @@ async function getUserTenantWithDetails(userId) {
   const tenantUser = tuData[0];
 
   // Get tenant details
-  const { data: tData, error: tError } = await supabase
+  const { data: tData, error: tError } = await dbClient
     .schema('auth_tenant')
     .from('tenants')
     .select('id, uuid, name, subdomain, redirect_url, client_id, client_secret, status, settings, backend_url, supabase_url, qr_enabled, qr_mode, qr_user_active, timezone')
@@ -219,10 +219,10 @@ async function getUserTenantWithDetails(userId) {
  * @param {Object} params - Attempt parameters
  */
 async function recordLoginAttempt({ email, userId, tenantId, success, failureReason, ipAddress, userAgent }) {
-  const supabase = getAuthSupabaseAdmin();
+  const dbClient = getAuthDbAdmin();
 
   try {
-    await supabase
+    await dbClient
       .schema('auth_tenant')
       .from('login_attempts')
       .insert({
@@ -245,10 +245,10 @@ async function recordLoginAttempt({ email, userId, tenantId, success, failureRea
  * @param {number} userId - User ID
  */
 async function updateLastLogin(userId) {
-  const supabase = getAuthSupabaseAdmin();
+  const dbClient = getAuthDbAdmin();
 
   try {
-    await supabase
+    await dbClient
       .schema('auth_tenant')
       .from('users')
       .update({ last_login_at: new Date().toISOString() })
@@ -553,7 +553,7 @@ async function exchangeCodeForUserInfo({ code, client_secret, device_info }) {
     // device registration if no tenant user row exists for this email.
     if (device_info) {
       try {
-        const tenantSupabase = getSupabaseAdmin();
+        const tenantSupabase = getDbAdmin();
         const { data: tenantUserRows, error: tenantUserErr } = await tenantSupabase
           .from('users')
           .select('id')
@@ -583,7 +583,7 @@ async function exchangeCodeForUserInfo({ code, client_secret, device_info }) {
     let userTimezone = CDT_DEFAULT;
     let companyTimezone = null;
     try {
-      const tenantSupabase = getSupabaseAdmin();
+      const tenantSupabase = getDbAdmin();
 
       // Resolve company/tenant timezone first (always needed for company_timezone field)
       if (tenant.timezone) {
@@ -722,10 +722,10 @@ async function exchangeCodeForUserInfo({ code, client_secret, device_info }) {
  */
 async function getUserTenants(userId) {
   try {
-    const supabase = getAuthSupabaseAdmin();
+    const dbClient = getAuthDbAdmin();
 
     // Get all active tenant_user records for this user
-    const { data: tuData, error: tuError } = await supabase
+    const { data: tuData, error: tuError } = await dbClient
       .schema('auth_tenant')
       .from('tenant_users')
       .select('tenant_id')
@@ -746,7 +746,7 @@ async function getUserTenants(userId) {
     // Get tenant details for all matching tenants
     // supabase_url / supabase_anon_key / supabase_service_key are returned as
     // stored in DB (encrypted). Mobile client decrypts with the shared key.
-    const { data: tenants, error: tError } = await supabase
+    const { data: tenants, error: tError } = await dbClient
       .schema('auth_tenant')
       .from('tenants')
       .select('id, uuid, name, subdomain, backend_url, status, image_url, supabase_url, supabase_anon_key, supabase_service_key')
@@ -794,10 +794,10 @@ async function getUserTenants(userId) {
  */
 async function generateSwitchCode({ userId, email, targetSubdomain }) {
   try {
-    const supabase = getAuthSupabaseAdmin();
+    const dbClient = getAuthDbAdmin();
 
     // Step 1: Look up target tenant by subdomain
-    const { data: tData, error: tError } = await supabase
+    const { data: tData, error: tError } = await dbClient
       .schema('auth_tenant')
       .from('tenants')
       .select('id, uuid, name, subdomain, redirect_url, client_id, client_secret, status, backend_url, supabase_url, supabase_anon_key, supabase_service_key, qr_enabled, qr_mode, qr_user_active')

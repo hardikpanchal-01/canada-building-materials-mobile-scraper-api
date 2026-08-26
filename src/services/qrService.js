@@ -10,23 +10,23 @@
 const crypto = require('crypto');
 const ticketService = require('./ticketService');
 const truckService = require('./truckService');
-const { getSupabaseAdmin } = require('../config/database');
-const { getAuthSupabaseAdmin } = require('../config/authDatabase');
+const { getDbAdmin } = require('../config/database');
+const { getAuthDbAdmin } = require('../config/authDatabase');
 
 /**
  * Fetch all ticket_products for a given ticket_code and attach to ticket object.
  */
 async function enrichTicketProducts(ticket, ticketCode) {
   try {
-    const supabase = getSupabaseAdmin();
-    const { data: tRow } = await supabase
+    const dbClient = getDbAdmin();
+    const { data: tRow } = await dbClient
       .from('tickets')
       .select('ticket_id, order_id, verifi_json')
       .eq('ticket_code', ticketCode)
       .limit(1)
       .maybeSingle();
     if (tRow?.ticket_id) {
-      const { data: products } = await supabase
+      const { data: products } = await dbClient
         .from('ticket_products')
         .select('id, ticket_id, item_code, description, short_description, is_mix, is_assoc, load_qty, delv_qty, delv_qty_unit, order_qty, order_qty_unit, ticket_qty, ticket_qty_unit, acc_delv_qty, slump')
         .eq('ticket_id', tRow.ticket_id);
@@ -42,7 +42,7 @@ async function enrichTicketProducts(ticket, ticketCode) {
         }
       }
       if (ticket.slump == null && tRow.order_id) {
-        const { data: opRow } = await supabase
+        const { data: opRow } = await dbClient
           .from('order_products')
           .select('slump')
           .eq('order_id', tRow.order_id)
@@ -202,14 +202,14 @@ async function getTenantQrSettings(userAccess) {
   if (!userAccess?.id) return null;
 
   try {
-    const supabase = getAuthSupabaseAdmin();
+    const dbClient = getAuthDbAdmin();
 
     // Step 1: Resolve UUID → integer user id in auth_tenant.users
     let numericUserId = null;
     if (typeof userAccess.id === 'number' || /^\d+$/.test(userAccess.id)) {
       numericUserId = Number(userAccess.id);
     } else {
-      const { data: uData } = await supabase
+      const { data: uData } = await dbClient
         .schema('auth_tenant')
         .from('users')
         .select('id')
@@ -222,7 +222,7 @@ async function getTenantQrSettings(userAccess) {
     }
 
     // Step 2: Get tenant_id from tenant_users
-    const { data: tuData } = await supabase
+    const { data: tuData } = await dbClient
       .schema('auth_tenant')
       .from('tenant_users')
       .select('tenant_id')
@@ -233,7 +233,7 @@ async function getTenantQrSettings(userAccess) {
     if (!tuData || tuData.length === 0) return null;
 
     // Step 3: Get QR-related tenant columns
-    const { data: tData, error: tError } = await supabase
+    const { data: tData, error: tError } = await dbClient
       .schema('auth_tenant')
       .from('tenants')
       .select('qr_enabled, qr_mode, security_mode')
@@ -336,8 +336,8 @@ async function verifyQrPayload(payload, userAccess) {
       // Try by order code — look up order_id from orders table
       if (qrData.orderCode) {
         try {
-          const supabase = getSupabaseAdmin();
-          const { data: orderRow } = await supabase
+          const dbClient = getDbAdmin();
+          const { data: orderRow } = await dbClient
             .from('orders')
             .select('order_id')
             .eq('order_code', qrData.orderCode)
@@ -378,8 +378,8 @@ async function verifyQrPayload(payload, userAccess) {
       // Fallback: direct DB lookup by ticket_code (no date filter)
       if (qrData.ticketCode) {
         try {
-          const supabase = getSupabaseAdmin();
-          const { data: ticketRow, error: ticketErr } = await supabase
+          const dbClient = getDbAdmin();
+          const { data: ticketRow, error: ticketErr } = await dbClient
             .from('tickets')
             .select('*')
             .eq('ticket_code', qrData.ticketCode)
@@ -390,7 +390,7 @@ async function verifyQrPayload(payload, userAccess) {
             console.log('[QR] ✅ Ticket found via direct DB lookup:', ticketRow.ticket_code);
 
             // Get ALL product info for this ticket
-            const { data: allProductRows } = await supabase
+            const { data: allProductRows } = await dbClient
               .from('ticket_products')
               .select('id, ticket_id, item_code, description, short_description, is_mix, is_assoc, load_qty, delv_qty, delv_qty_unit, order_qty, order_qty_unit, ticket_qty, ticket_qty_unit, acc_delv_qty, slump')
               .eq('ticket_id', ticketRow.ticket_id);
@@ -403,7 +403,7 @@ async function verifyQrPayload(payload, userAccess) {
             // Get truck description and plant address
             let truckDesc = null;
             if (ticketRow.truck_code) {
-              const { data: truckRow } = await supabase
+              const { data: truckRow } = await dbClient
                 .from('trucks')
                 .select('description')
                 .eq('code', ticketRow.truck_code)
@@ -414,7 +414,7 @@ async function verifyQrPayload(payload, userAccess) {
 
             let plantAddress = null;
             if (ticketRow.plant_code) {
-              const { data: plantRow } = await supabase
+              const { data: plantRow } = await dbClient
                 .from('plants')
                 .select('address1, address2, address3')
                 .eq('code', ticketRow.plant_code)
@@ -430,7 +430,7 @@ async function verifyQrPayload(payload, userAccess) {
             let orderRow = null;
             let orderSlump = null;
             if (ticketRow.order_id) {
-              const { data: oRow } = await supabase
+              const { data: oRow } = await dbClient
                 .from('orders')
                 .select('ordered_by_name, ordered_by_phone, purchase_order, customer_job')
                 .eq('order_id', ticketRow.order_id)
@@ -439,7 +439,7 @@ async function verifyQrPayload(payload, userAccess) {
               orderRow = oRow;
 
               // Get slump from order_products as fallback (ticket_products.slump may be null)
-              const { data: opRow } = await supabase
+              const { data: opRow } = await dbClient
                 .from('order_products')
                 .select('slump')
                 .eq('order_id', ticketRow.order_id)
@@ -615,13 +615,13 @@ async function getTenantInfo(userAccess) {
   if (!userAccess?.id) return null;
 
   try {
-    const supabase = getAuthSupabaseAdmin();
+    const dbClient = getAuthDbAdmin();
 
     let numericUserId = null;
     if (typeof userAccess.id === 'number' || /^\d+$/.test(userAccess.id)) {
       numericUserId = Number(userAccess.id);
     } else {
-      const { data: uData } = await supabase
+      const { data: uData } = await dbClient
         .schema('auth_tenant')
         .from('users')
         .select('id')
@@ -632,7 +632,7 @@ async function getTenantInfo(userAccess) {
       numericUserId = uData[0].id;
     }
 
-    const { data: tuData } = await supabase
+    const { data: tuData } = await dbClient
       .schema('auth_tenant')
       .from('tenant_users')
       .select('tenant_id')
@@ -641,7 +641,7 @@ async function getTenantInfo(userAccess) {
       .limit(1);
     if (!tuData || tuData.length === 0) return null;
 
-    const { data: tData } = await supabase
+    const { data: tData } = await dbClient
       .schema('auth_tenant')
       .from('tenants')
       .select('id, uuid, name, subdomain, status, qr_user_active')

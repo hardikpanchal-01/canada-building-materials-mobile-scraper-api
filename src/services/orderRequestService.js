@@ -1,4 +1,4 @@
-const { getSupabaseAdmin } = require('../config/database');
+const { getDbAdmin } = require('../config/database');
 
 // Fallback timezone when no tenant/user timezone is available
 const FALLBACK_TZ = 'America/Chicago';
@@ -205,7 +205,7 @@ function formatOrderRow(row, tz, tenantTz) {
 
 // Get order requests with pagination, filtering, and search
 async function getOrderRequests({ userId, userIds, isAdmin, userType, page = 1, limit = 15, status, search, tz, tenantTz } = {}) {
-  const supabase = getSupabaseAdmin();
+  const dbClient = getDbAdmin();
 
   // For contractor filtering, use userIds array (handles UUID migration)
   // Falls back to [userId] if userIds not provided (backward compatibility)
@@ -213,7 +213,7 @@ async function getOrderRequests({ userId, userIds, isAdmin, userType, page = 1, 
 
   // --- DB-level counts in parallel (head:true = no rows transferred) ---
   const buildCountQuery = () => {
-    let q = supabase.from('order_entities').select('*', { count: 'exact', head: true });
+    let q = dbClient.from('order_entities').select('*', { count: 'exact', head: true });
     if (!isAdmin && userType !== 'producer' && contractorIds.length > 0) {
       q = q.in('user_id', contractorIds);
     }
@@ -240,7 +240,7 @@ async function getOrderRequests({ userId, userIds, isAdmin, userType, page = 1, 
   };
 
   // --- Build paginated data query ---
-  let query = supabase.from('order_entities').select('*', { count: 'exact' });
+  let query = dbClient.from('order_entities').select('*', { count: 'exact' });
 
   // Scope by user if not admin/producer (contractor sees only their own)
   if (!isAdmin && userType !== 'producer' && contractorIds.length > 0) {
@@ -289,8 +289,8 @@ async function getOrderRequests({ userId, userIds, isAdmin, userType, page = 1, 
 
 // Get single order request by ID
 async function getOrderRequestById(id, tz = null, tenantTz = null) {
-  const supabase = getSupabaseAdmin();
-  const { data, error } = await supabase
+  const dbClient = getDbAdmin();
+  const { data, error } = await dbClient
     .from('order_entities')
     .select('*')
     .eq('id', id)
@@ -302,8 +302,8 @@ async function getOrderRequestById(id, tz = null, tenantTz = null) {
 
 // Create order request
 async function createOrderRequest(input, tenantTz = null) {
-  const supabase = getSupabaseAdmin();
-  const { data, error } = await supabase
+  const dbClient = getDbAdmin();
+  const { data, error } = await dbClient
     .from('order_entities')
     .insert({
       user_id: input.user_id,
@@ -366,8 +366,8 @@ async function createOrderRequest(input, tenantTz = null) {
 
 // Update order request
 async function updateOrderRequest(id, input, tenantTz = null) {
-  const supabase = getSupabaseAdmin();
-  const { error } = await supabase
+  const dbClient = getDbAdmin();
+  const { error } = await dbClient
     .from('order_entities')
     .update({
       order_type: input.order_type || 'without_project',
@@ -434,8 +434,8 @@ async function updateOrderRequestStatus(id, status) {
     throw new Error('Invalid status');
   }
 
-  const supabase = getSupabaseAdmin();
-  const { error } = await supabase
+  const dbClient = getDbAdmin();
+  const { error } = await dbClient
     .from('order_entities')
     .update({ status, updated_at: new Date().toISOString() })
     .eq('id', id);
@@ -446,7 +446,7 @@ async function updateOrderRequestStatus(id, status) {
 
 // Update verification fields
 async function updateOrderVerification(id, data, tenantTz = null) {
-  const supabase = getSupabaseAdmin();
+  const dbClient = getDbAdmin();
   const updatePayload = { updated_at: new Date().toISOString() };
 
   if (data.order_number !== undefined) updatePayload.order_number = data.order_number || null;
@@ -457,7 +457,7 @@ async function updateOrderVerification(id, data, tenantTz = null) {
     updatePayload.on_job_time = convertTimeToUtc(dateForConversion, data.on_job_time, tenantTz);
   }
 
-  const { error } = await supabase
+  const { error } = await dbClient
     .from('order_entities')
     .update(updatePayload)
     .eq('id', id);
@@ -468,8 +468,8 @@ async function updateOrderVerification(id, data, tenantTz = null) {
 
 // Get messages for an order request
 async function getMessages(orderEntityId, tz = null) {
-  const supabase = getSupabaseAdmin();
-  const { data, error } = await supabase
+  const dbClient = getDbAdmin();
+  const { data, error } = await dbClient
     .from('order_entity_messages')
     .select('*')
     .eq('order_entity_id', orderEntityId)
@@ -488,10 +488,10 @@ async function getMessages(orderEntityId, tz = null) {
 
 // Send a message
 async function sendMessage(orderEntityId, senderId, messageText, senderRole, tz = null) {
-  const supabase = getSupabaseAdmin();
+  const dbClient = getDbAdmin();
 
   // Fetch sender name server-side
-  const { data: userProfile } = await supabase
+  const { data: userProfile } = await dbClient
     .from('users')
     .select('full_name, email')
     .eq('id', senderId)
@@ -499,7 +499,7 @@ async function sendMessage(orderEntityId, senderId, messageText, senderRole, tz 
 
   const senderName = userProfile?.full_name || userProfile?.email || 'Unknown User';
 
-  const { data, error } = await supabase
+  const { data, error } = await dbClient
     .from('order_entity_messages')
     .insert({
       order_entity_id: orderEntityId,
@@ -524,13 +524,13 @@ let formDataCacheTime = 0;
 const FORM_DATA_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
 // Batch-fetch helper for large tables
-async function fetchAllBatched(supabase, table, selectFields, filters, orderField, batchSize = 1000) {
+async function fetchAllBatched(dbClient, table, selectFields, filters, orderField, batchSize = 1000) {
   let all = [];
   let offset = 0;
   let hasMore = true;
 
   while (hasMore) {
-    let query = supabase.from(table).select(selectFields);
+    let query = dbClient.from(table).select(selectFields);
     if (filters) query = filters(query);
     query = query.order(orderField, { ascending: true }).range(offset, offset + batchSize - 1);
 
@@ -554,12 +554,12 @@ async function getFormData() {
     return formDataCache;
   }
 
-  const supabase = getSupabaseAdmin();
+  const dbClient = getDbAdmin();
 
   // Run ALL 5 fetches in parallel
   const [regions, customers, projects, admixtureRaw, otherRaw] = await Promise.all([
     // 1. Regions (small table - single query)
-    supabase
+    dbClient
       .from('regions')
       .select('code, description')
       .order('description', { ascending: true })
@@ -569,16 +569,16 @@ async function getFormData() {
       }),
 
     // 2. Customers (large table - batched)
-    fetchAllBatched(supabase, 'customers', 'code, name',
+    fetchAllBatched(dbClient, 'customers', 'code, name',
       (q) => q.or('inactive.is.null,inactive.eq.false'), 'name'),
 
     // 3. Projects (large table - batched)
-    fetchAllBatched(supabase, 'projects',
+    fetchAllBatched(dbClient, 'projects',
       'id, code, name, customer_code, customer_name, delivery_addr1, delivery_addr2, delivery_addr3, contact, phone',
       null, 'name'),
 
     // 4. Admixture products (matches web query exactly - no .order() before limit)
-    supabase
+    dbClient
       .from('order_products')
       .select('item_code, description')
       .eq('is_mix', false)
@@ -588,7 +588,7 @@ async function getFormData() {
       .then(({ data }) => data || []),
 
     // 5. Other products (matches web query exactly - no .order() before limit)
-    supabase
+    dbClient
       .from('order_products')
       .select('item_code, description')
       .eq('is_mix', false)
@@ -639,9 +639,9 @@ async function getOrdersByProjectCode(projectCode) {
     return [];
   }
 
-  const supabase = getSupabaseAdmin();
+  const dbClient = getDbAdmin();
 
-  const { data, error } = await supabase
+  const { data, error } = await dbClient
     .from('orders')
     .select('order_id, order_code, customer_code, customer_name, order_date, project_name, delivery_addr1, delivery_addr2, delivery_addr3, ordered_by_name, ordered_by_phone, pricing_plant_code, zone_name')
     .eq('project_code', projectCode.trim())
@@ -659,11 +659,11 @@ async function searchOrders(searchTerm) {
     return [];
   }
 
-  const supabase = getSupabaseAdmin();
+  const dbClient = getDbAdmin();
   const term = searchTerm.trim();
 
   // Use prefix match for order_code (index-friendly) and contains for customer_name
-  const { data, error } = await supabase
+  const { data, error } = await dbClient
     .from('orders')
     .select('order_id, order_code, customer_code, customer_name, order_date, project_name, delivery_addr1, delivery_addr2, delivery_addr3, ordered_by_name, ordered_by_phone, pricing_plant_code, zone_name')
     .or(`order_code.ilike.${term}%,customer_name.ilike.%${term}%`)
@@ -684,7 +684,7 @@ async function searchOrders(searchTerm) {
 
 // Search mix products
 async function searchProducts(search = '', uniqueOffset = 0, limit = 50) {
-  const supabase = getSupabaseAdmin();
+  const dbClient = getDbAdmin();
   const BATCH_SIZE = 1000;
   const needed = uniqueOffset + limit + 1;
   const seen = new Map();
@@ -692,7 +692,7 @@ async function searchProducts(search = '', uniqueOffset = 0, limit = 50) {
   let exhausted = false;
 
   while (seen.size < needed && !exhausted) {
-    let query = supabase
+    let query = dbClient
       .from('order_products')
       .select('item_code, description, slump')
       .eq('is_mix', true)
@@ -739,8 +739,8 @@ async function searchProducts(search = '', uniqueOffset = 0, limit = 50) {
 async function getRecentOrderEntities(userId) {
   if (!userId) return [];
 
-  const supabase = getSupabaseAdmin();
-  const { data, error } = await supabase
+  const dbClient = getDbAdmin();
+  const { data, error } = await dbClient
     .from('order_entities')
     .select('id, job_name, on_job_date, company_name, company_id')
     .eq('user_id', userId)

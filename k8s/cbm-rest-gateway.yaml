@@ -1,0 +1,92 @@
+# cbm-rest-gateway — core-data PostgREST gateway fronting the migrated CNPG
+# database `vcna_cbm` (on shared cluster pm-postgres), mirroring superior-rest-gateway.
+# The mobile API's data client (SUPABASE_URL) talks to this over a
+# PostgREST /rest/v1 surface, so core data works with NO app code changes.
+#   - cbm-postgrest    : PostgREST → vcna_cbm (authenticator role), schemas public,dispatch_source
+#   - cbm-rest-gateway : nginx, maps /rest/v1/* → postgrest (PostgREST REST shape)
+# Config: secret cbm-postgrest-secret (PGRST_DB_URI, PGRST_JWT_SECRET), configmap cbm-rest-gateway-conf.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cbm-postgrest
+  namespace: cbm
+  labels: { app: cbm-postgrest }
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: cbm-postgrest }
+  template:
+    metadata:
+      labels: { app: cbm-postgrest }
+    spec:
+      containers:
+        - name: postgrest
+          image: postgrest/postgrest:v12.2.3
+          env:
+            - { name: PGRST_DB_URI, valueFrom: { secretKeyRef: { name: cbm-postgrest-secret, key: PGRST_DB_URI } } }
+            - { name: PGRST_JWT_SECRET, valueFrom: { secretKeyRef: { name: cbm-postgrest-secret, key: PGRST_JWT_SECRET } } }
+            - { name: PGRST_DB_SCHEMAS, value: "public,dispatch_source" }
+            - { name: PGRST_DB_ANON_ROLE, value: "anon" }
+            - { name: PGRST_DB_POOL, value: "20" }
+            - { name: PGRST_SERVER_PORT, value: "3000" }
+          ports:
+            - containerPort: 3000
+          resources:
+            requests: { cpu: "50m", memory: "128Mi" }
+            limits: { memory: "384Mi" }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cbm-postgrest
+  namespace: cbm
+  labels: { app: cbm-postgrest }
+spec:
+  type: ClusterIP
+  selector: { app: cbm-postgrest }
+  ports:
+    - port: 3000
+      targetPort: 3000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cbm-rest-gateway
+  namespace: cbm
+  labels: { app: cbm-rest-gateway }
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: cbm-rest-gateway }
+  template:
+    metadata:
+      labels: { app: cbm-rest-gateway }
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.27-alpine
+          ports:
+            - containerPort: 80
+          volumeMounts:
+            - mountPath: /etc/nginx/nginx.conf
+              name: conf
+              subPath: nginx.conf
+          resources:
+            requests: { cpu: "25m", memory: "32Mi" }
+            limits: { memory: "64Mi" }
+      volumes:
+        - configMap: { name: cbm-rest-gateway-conf }
+          name: conf
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cbm-rest-gateway
+  namespace: cbm
+  labels: { app: cbm-rest-gateway }
+spec:
+  type: ClusterIP
+  selector: { app: cbm-rest-gateway }
+  ports:
+    - port: 80
+      targetPort: 80

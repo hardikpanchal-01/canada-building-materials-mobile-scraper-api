@@ -20,7 +20,7 @@ API for ingesting scraped order data from external Python scrapers.
 
 This API provides endpoints for receiving order data that has been
 scraped from external dispatch systems. The data is validated, sanitized,
-stored in Supabase Storage as JSON, and tracked in PostgreSQL.
+stored in Postgres Storage as JSON, and tracked in PostgreSQL.
 
 ## Authentication
 

@@ -1,4 +1,4 @@
-const { getNotificationSupabase } = require('../config/notificationDatabase');
+const { getNotificationDb } = require('../config/notificationDatabase');
 
 /**
  * Get notifications for a user filtered by tenant with pagination
@@ -9,12 +9,12 @@ const { getNotificationSupabase } = require('../config/notificationDatabase');
  * @returns {Object} { notifications, total, page, limit, totalPages }
  */
 async function getNotifications(userId, tenantId, page = 1, limit = 50) {
-  const supabase = getNotificationSupabase();
+  const dbClient = getNotificationDb();
 
   const from = (page - 1) * limit;
   const to = from + limit - 1;
 
-  const { data, error, count } = await supabase
+  const { data, error, count } = await dbClient
     .from('notification_queue')
     .select('*', { count: 'exact' })
     .eq('user_id', userId)
@@ -42,12 +42,12 @@ async function getNotifications(userId, tenantId, page = 1, limit = 50) {
  * @param {number} limit
  */
 async function getRecentNotifications(userId, page = 1, limit = 20) {
-  const supabase = getNotificationSupabase();
+  const dbClient = getNotificationDb();
 
   const from = (page - 1) * limit;
   const to = from + limit - 1;
 
-  const { data, error, count } = await supabase
+  const { data, error, count } = await dbClient
     .from('notification_queue')
     .select('*', { count: 'exact' })
     .eq('user_id', userId)

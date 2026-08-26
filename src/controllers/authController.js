@@ -459,7 +459,7 @@ async function me(req, res) {
  *       1. Validates email format
  *       2. Checks rate limiting (5 min window)
  *       3. Verifies user exists in database
- *       4. Generates reset token via Supabase
+ *       4. Generates reset token via Postgres
  *       5. Sends password reset email
  *
  *       **Security Notes:**
@@ -1036,7 +1036,7 @@ async function sendPhoneOtp(req, res) {
  *     summary: Verify phone OTP and complete registration (Step 4)
  *     description: |
  *       Verifies the phone OTP and completes user registration.
- *       Creates the user in Supabase Auth and public.users table.
+ *       Creates the user in Postgres Auth and public.users table.
  *       Returns JWT access and refresh tokens on success.
  *     tags: [Auth]
  *     requestBody:
@@ -1206,11 +1206,11 @@ async function resendEmailOtp(req, res) {
       return res.status(400).json({ success: false, message: 'Email is required' });
     }
 
-    const { getSupabaseAdmin } = require('../config/database');
-    const supabase = getSupabaseAdmin();
+    const { getDbAdmin } = require('../config/database');
+    const dbClient = getDbAdmin();
 
     // Ensure there is a pending signup
-    const { data: pending } = await supabase
+    const { data: pending } = await dbClient
       .from('signup_pending')
       .select('email')
       .eq('email', email.toLowerCase().trim())
@@ -1269,11 +1269,11 @@ async function resendPhoneOtp(req, res) {
       return res.status(400).json({ success: false, message: 'Email is required' });
     }
 
-    const { getSupabaseAdmin } = require('../config/database');
-    const supabase = getSupabaseAdmin();
+    const { getDbAdmin } = require('../config/database');
+    const dbClient = getDbAdmin();
     const normalizedEmail = email.toLowerCase().trim();
 
-    const { data: pending } = await supabase
+    const { data: pending } = await dbClient
       .from('signup_pending')
       .select('*')
       .eq('email', normalizedEmail)

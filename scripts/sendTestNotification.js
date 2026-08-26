@@ -5,15 +5,15 @@
  */
 
 require('dotenv').config();
-const { getSupabase, getSupabaseAdmin } = require('../src/config/database');
+const { getDb, getDbAdmin } = require('../src/config/database');
 const notificationService = require('../src/services/notificationService');
 const deviceService = require('../src/services/deviceService');
 
 async function findUserByEmail(email) {
-  const supabaseAdmin = getSupabaseAdmin();
+  const dbAdmin = getDbAdmin();
 
   // Get user from auth.users
-  const { data: authData, error: authError } = await supabaseAdmin.auth.admin.listUsers();
+  const { data: authData, error: authError } = await dbAdmin.auth.admin.listUsers();
 
   if (authError) {
     throw new Error(`Error fetching users: ${authError.message}`);

@@ -8,7 +8,7 @@
 
 require('dotenv').config();
 
-const { getSupabaseAdmin: getSupabase } = require('../src/config/database');
+const { getDbAdmin: getDb } = require('../src/config/database');
 const { getMessaging } = require('../src/config/Firebase');
 
 const TOKEN_ARG = process.argv[2]; // optional: pass token as CLI arg
@@ -57,9 +57,9 @@ async function run() {
   }
 
   // Otherwise list devices and send to the latest
-  const supabase = getSupabase();
+  const dbClient = getDb();
 
-  const { data: devices, error } = await supabase
+  const { data: devices, error } = await dbClient
     .from('user_devices')
     .select('id, user_id, device_token, device_type, device_name, last_active_at')
     .eq('is_active', true)
