@@ -193,7 +193,7 @@ async function getUserTenantWithDetails(userId) {
   const { data: tData, error: tError } = await dbClient
     .schema('auth_tenant')
     .from('tenants')
-    .select('id, uuid, name, subdomain, redirect_url, client_id, client_secret, status, settings, backend_url, supabase_url, qr_enabled, qr_mode, qr_user_active, timezone')
+    .select('id, uuid, name, subdomain, redirect_url, client_id, client_secret, status, settings, backend_url, qr_enabled, qr_mode, qr_user_active, timezone')
     .eq('id', tenantUser.tenant_id)
     .is('deleted_at', null)
     .limit(1);
@@ -553,8 +553,8 @@ async function exchangeCodeForUserInfo({ code, client_secret, device_info }) {
     // device registration if no tenant user row exists for this email.
     if (device_info) {
       try {
-        const tenantSupabase = getDbAdmin();
-        const { data: tenantUserRows, error: tenantUserErr } = await tenantSupabase
+        const tenantDb = getDbAdmin();
+        const { data: tenantUserRows, error: tenantUserErr } = await tenantDb
           .from('users')
           .select('id')
           .eq('email', user.email.toLowerCase().trim())
@@ -583,14 +583,14 @@ async function exchangeCodeForUserInfo({ code, client_secret, device_info }) {
     let userTimezone = CDT_DEFAULT;
     let companyTimezone = null;
     try {
-      const tenantSupabase = getDbAdmin();
+      const tenantDb = getDbAdmin();
 
       // Resolve company/tenant timezone first (always needed for company_timezone field)
       if (tenant.timezone) {
         const tenantTz = tenant.timezone;
         const ianaCode = typeof tenantTz === 'string' ? tenantTz : (tenantTz.iana || tenantTz.iana_code);
         if (ianaCode) {
-          const { data: companyTzData } = await tenantSupabase
+          const { data: companyTzData } = await tenantDb
             .from('timezones')
             .select('id, iana_code, display_name, abbreviation, utc_offset, dst_offset')
             .eq('iana_code', ianaCode)
@@ -603,7 +603,7 @@ async function exchangeCodeForUserInfo({ code, client_secret, device_info }) {
       }
 
       // Check user's saved preference first
-      const { data: prefData } = await tenantSupabase
+      const { data: prefData } = await tenantDb
         .from('user_preferences')
         .select('preference_value')
         .eq('user_id', user.uuid)
@@ -616,7 +616,7 @@ async function exchangeCodeForUserInfo({ code, client_secret, device_info }) {
 
         // Handle object format: { iana: "America/Chicago" }
         if (typeof pv === 'object' && pv.iana) {
-          const { data } = await tenantSupabase
+          const { data } = await tenantDb
             .from('timezones')
             .select('id, iana_code, display_name, abbreviation, utc_offset, dst_offset')
             .eq('iana_code', pv.iana)
@@ -627,7 +627,7 @@ async function exchangeCodeForUserInfo({ code, client_secret, device_info }) {
         else {
           const tzId = typeof pv === 'number' ? pv : Number(pv);
           if (!isNaN(tzId)) {
-            const { data } = await tenantSupabase
+            const { data } = await tenantDb
               .from('timezones')
               .select('id, iana_code, display_name, abbreviation, utc_offset, dst_offset')
               .eq('id', tzId)
@@ -649,17 +649,8 @@ async function exchangeCodeForUserInfo({ code, client_secret, device_info }) {
     }
 
     // Step 11: Return user information in same format as existing login API
-    // supabase_config values are returned as stored in DB (encrypted). The mobile
-    // client decrypts them using the encryption key shared out-of-band.
-    const supabaseConfig = {
-      SUPABASE_URL: tenant.supabase_url || null,
-      SUPABASE_ANON_KEY: tenant.supabase_anon_key || null,
-      SUPABASE_SERVICE_ROLE_KEY: tenant.supabase_service_key || null
-    };
-
     return {
       success: true,
-      supabase_config: supabaseConfig,
       user: {
         id: user.uuid,
         email: user.email,
@@ -687,7 +678,6 @@ async function exchangeCodeForUserInfo({ code, client_secret, device_info }) {
             tenant_subdomain: tenant.subdomain,
             tenant_redirect_url: tenant.redirect_url,
             tenant_client_id: tenant.client_id,
-            tenant_supabase_url: tenant.supabase_url || null,
             // Fall back to the per-tenant API host when backend_url is unset in the
             // DB — matches the admin federated-login behavior so the mobile app
             // never receives a null backend_url (which crashes normalizeBackendUrl).
@@ -744,12 +734,10 @@ async function getUserTenants(userId) {
     const tenantIds = tuData.map(tu => tu.tenant_id);
 
     // Get tenant details for all matching tenants
-    // supabase_url / supabase_anon_key / supabase_service_key are returned as
-    // stored in DB (encrypted). Mobile client decrypts with the shared key.
     const { data: tenants, error: tError } = await dbClient
       .schema('auth_tenant')
       .from('tenants')
-      .select('id, uuid, name, subdomain, backend_url, status, image_url, supabase_url, supabase_anon_key, supabase_service_key')
+      .select('id, uuid, name, subdomain, backend_url, status, image_url')
       .in('id', tenantIds)
       .is('deleted_at', null)
       .eq('status', 'active')
@@ -768,12 +756,7 @@ async function getUserTenants(userId) {
         name: t.name,
         subdomain: t.subdomain,
         backend_url: t.backend_url || `https://${t.subdomain}-api.truckast.ai`,
-        image_url: t.image_url || null,
-        supabase_config: {
-          SUPABASE_URL: t.supabase_url || null,
-          SUPABASE_ANON_KEY: t.supabase_anon_key || null,
-          SUPABASE_SERVICE_ROLE_KEY: t.supabase_service_key || null
-        }
+        image_url: t.image_url || null
       }))
     };
   } catch (error) {
@@ -800,7 +783,7 @@ async function generateSwitchCode({ userId, email, targetSubdomain }) {
     const { data: tData, error: tError } = await dbClient
       .schema('auth_tenant')
       .from('tenants')
-      .select('id, uuid, name, subdomain, redirect_url, client_id, client_secret, status, backend_url, supabase_url, supabase_anon_key, supabase_service_key, qr_enabled, qr_mode, qr_user_active')
+      .select('id, uuid, name, subdomain, redirect_url, client_id, client_secret, status, backend_url, qr_enabled, qr_mode, qr_user_active')
       .eq('subdomain', targetSubdomain.toLowerCase().trim())
       .is('deleted_at', null)
       .limit(1);
@@ -842,11 +825,6 @@ async function generateSwitchCode({ userId, email, targetSubdomain }) {
         name: tenant.name,
         subdomain: tenant.subdomain,
         backend_url: tenant.backend_url || `https://${tenant.subdomain}-api.truckast.ai`
-      },
-      supabase_config: {
-        SUPABASE_URL: tenant.supabase_url || null,
-        SUPABASE_ANON_KEY: tenant.supabase_anon_key || null,
-        SUPABASE_SERVICE_ROLE_KEY: tenant.supabase_service_key || null
       }
     };
   } catch (error) {

@@ -125,12 +125,6 @@ async function getTenantByClientId(clientId) {
     if (tenant.client_secret) {
       decryptedData.client_secret_decrypted = decrypt(tenant.client_secret);
     }
-    if (tenant.supabase_anon_key) {
-      decryptedData.supabase_anon_key_decrypted = decrypt(tenant.supabase_anon_key);
-    }
-    if (tenant.supabase_service_key) {
-      decryptedData.supabase_service_key_decrypted = decrypt(tenant.supabase_service_key);
-    }
   } catch (decryptError) {
     console.error('Failed to decrypt tenant credentials:', decryptError.message);
     // Return without decrypted fields if decryption fails
@@ -201,50 +195,10 @@ async function validateClientCredentials(clientId, clientSecret) {
   };
 }
 
-/**
- * Get tenant's Postgres credentials (decrypted)
- * Used to authenticate against tenant's Postgres instance
- * @param {number} tenantId - Tenant ID
- * @returns {Object|null} Decrypted Postgres credentials
- */
-async function getTenantSupabaseCredentials(tenantId) {
-  const dbClient = getAuthDbAdmin();
-
-  const { data, error } = await dbClient
-    .schema('auth_tenant')
-    .from('tenants')
-    .select('supabase_url, supabase_anon_key, supabase_service_key')
-    .eq('id', tenantId)
-    .is('deleted_at', null)
-    .limit(1);
-
-  if (error) {
-    console.log('[TenantService] getTenantSupabaseCredentials error:', error.message);
-    return null;
-  }
-
-  if (!data || data.length === 0) {
-    return null;
-  }
-
-  const tenant = data[0];
-
-  try {
-    return {
-      supabase_url: tenant.supabase_url,
-      supabase_anon_key: tenant.supabase_anon_key ? decrypt(tenant.supabase_anon_key) : null,
-      supabase_service_key: tenant.supabase_service_key ? decrypt(tenant.supabase_service_key) : null
-    };
-  } catch (decryptError) {
-    console.error('Failed to decrypt tenant Postgres credentials:', decryptError.message);
-    return null;
-  }
-}
 
 module.exports = {
   getTenantBySubdomain,
   getTenantById,
   getTenantByClientId,
-  validateClientCredentials,
-  getTenantSupabaseCredentials
+  validateClientCredentials
 };
