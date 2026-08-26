@@ -1,0 +1,87 @@
+# Canada Building Materials Mobile/Scraper API — mirrors superior-api / pm-api.
+#
+# Config is layered (envFrom order = api-env first, core-env LAST so core wins):
+#   - cbm-api-env  : API-only keys (AUTH_SUPABASE=cbm-authgw, JWT, ENCRYPTION_KEY,
+#                    tenant cfg, ANTHROPIC_API_KEY, API_BASE_URL)
+#   - cbm-core-env : the migrated CORE (CNPG DATABASE_URL, SUPABASE_URL=cbm-rest-gateway,
+#                    SUPABASE_SERVICE_KEY, SMTP, TWILIO)
+# Federated auth reaches the SHARED central_auth via cbm-authgw (see cbm-authgw.yaml).
+# Isolated & reversible: `kubectl -n cbm delete -f k8s/cbm-api.yaml`.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cbm-api
+  namespace: cbm
+  labels: { app: cbm-api }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: cbm-api }
+  strategy:
+    rollingUpdate: { maxSurge: 0, maxUnavailable: 1 }
+  template:
+    metadata:
+      labels: { app: cbm-api }
+    spec:
+      containers:
+        - name: cbm-api
+          image: 739272173777.dkr.ecr.us-east-1.amazonaws.com/cbm-api:v1
+          workingDir: /app
+          command: ["node", "server.js"]
+          ports:
+            - containerPort: 5000
+          envFrom:
+            - secretRef: { name: cbm-api-env }
+            - secretRef: { name: cbm-core-env }
+          env:
+            - { name: PORT, value: "5000" }
+            - { name: NODE_ENV, value: "production" }
+            - { name: CHAT_REALTIME_DISABLED, value: "true" }
+          readinessProbe:
+            httpGet: { path: /health, port: 5000 }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            tcpSocket: { port: 5000 }
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 6
+          resources:
+            requests: { cpu: "100m", memory: "256Mi" }
+            limits:   { memory: "512Mi" }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cbm-api
+  namespace: cbm
+  labels: { app: cbm-api }
+spec:
+  type: ClusterIP
+  selector: { app: cbm-api }
+  ports:
+    - port: 80
+      targetPort: 5000
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: cbm-api
+  namespace: cbm
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80}]'
+    alb.ingress.kubernetes.io/healthcheck-path: /health
+spec:
+  ingressClassName: alb
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: cbm-api
+                port: { number: 80 }

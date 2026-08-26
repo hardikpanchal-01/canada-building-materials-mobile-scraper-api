@@ -1,0 +1,92 @@
+# cbm-authgw — per-tenant PostgREST gateway fronting the SHARED central_auth DB,
+# mirroring superior-authgw / pm-authgw. The mobile API's Supabase auth client
+# (AUTH_SUPABASE_URL) talks to this over a Supabase-compatible /rest/v1 surface,
+# so federated auth works with NO app code changes.
+#   - cbm-authgw-postgrest : PostgREST → central_auth (role auth_app), schemas public,auth_tenant
+#   - cbm-authgw           : nginx, maps /rest/v1/* → postgrest (Supabase REST shape)
+# Config: secret cbm-authgw-env (PGRST_DB_URI, PGRST_JWT_SECRET), configmap cbm-authgw-conf.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cbm-authgw-postgrest
+  namespace: cbm
+  labels: { app: cbm-authgw-postgrest }
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: cbm-authgw-postgrest }
+  template:
+    metadata:
+      labels: { app: cbm-authgw-postgrest }
+    spec:
+      containers:
+        - name: postgrest
+          image: postgrest/postgrest:v12.2.3
+          envFrom:
+            - secretRef: { name: cbm-authgw-env }
+          env:
+            - { name: PGRST_DB_SCHEMAS, value: "public,auth_tenant" }
+            - { name: PGRST_DB_ANON_ROLE, value: "auth_app" }
+            - { name: PGRST_DB_POOL, value: "10" }
+            - { name: PGRST_SERVER_PORT, value: "3000" }
+          ports:
+            - containerPort: 3000
+          resources:
+            requests: { cpu: "50m", memory: "128Mi" }
+            limits: { memory: "256Mi" }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cbm-authgw-postgrest
+  namespace: cbm
+  labels: { app: cbm-authgw-postgrest }
+spec:
+  type: ClusterIP
+  selector: { app: cbm-authgw-postgrest }
+  ports:
+    - port: 3000
+      targetPort: 3000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cbm-authgw
+  namespace: cbm
+  labels: { app: cbm-authgw }
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: cbm-authgw }
+  template:
+    metadata:
+      labels: { app: cbm-authgw }
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.27-alpine
+          ports:
+            - containerPort: 80
+          volumeMounts:
+            - mountPath: /etc/nginx/nginx.conf
+              name: conf
+              subPath: nginx.conf
+          resources:
+            requests: { cpu: "25m", memory: "32Mi" }
+            limits: { memory: "64Mi" }
+      volumes:
+        - configMap: { name: cbm-authgw-conf }
+          name: conf
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cbm-authgw
+  namespace: cbm
+  labels: { app: cbm-authgw }
+spec:
+  type: ClusterIP
+  selector: { app: cbm-authgw }
+  ports:
+    - port: 80
+      targetPort: 80
