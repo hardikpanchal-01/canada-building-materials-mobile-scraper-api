@@ -1,6 +1,6 @@
 # cbm-rest-gateway — core-data PostgREST gateway fronting the migrated CNPG
 # database `vcna_cbm` (on shared cluster pm-postgres), mirroring superior-rest-gateway.
-# The mobile API's data client (SUPABASE_URL) talks to this over a
+# The mobile API's data client (DATA_GATEWAY_URL) talks to this over a
 # PostgREST /rest/v1 surface, so core data works with NO app code changes.
 #   - cbm-postgrest    : PostgREST → vcna_cbm (authenticator role), schemas public,dispatch_source
 #   - cbm-rest-gateway : nginx, maps /rest/v1/* → postgrest (PostgREST REST shape)

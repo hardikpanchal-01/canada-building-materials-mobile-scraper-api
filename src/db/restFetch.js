@@ -6,7 +6,7 @@
  *
  * These talk to the SAME self-hosted gateway the app already points at
  * (the tenant REST/auth gateway URL), using Node's global `fetch` — so there is
- * no `@supabase/*` package involved and behaviour is byte-for-byte what it was,
+ * no `@gateway/*` package involved and behaviour is byte-for-byte what it was,
  * while all ordinary table reads/writes run on direct Postgres (see client.js).
  *
  * Every method returns `{ data, error }` (never throws for a request error), so

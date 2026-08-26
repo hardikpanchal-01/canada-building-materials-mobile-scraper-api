@@ -6,7 +6,7 @@
  * query builder + executor. Database functions (`.rpc`), the GoTrue auth admin
  * surface (`.auth`) and object storage (`.storage`) are served by the thin
  * fetch clients in restFetch.js against the tenant's self-hosted gateway, so
- * their behaviour is preserved exactly with no `@supabase/*` dependency.
+ * their behaviour is preserved exactly with no `@gateway/*` dependency.
  *
  * The returned object mirrors the surface the code already uses:
  *   client.from(table)…            -> pg

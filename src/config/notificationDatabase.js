@@ -18,9 +18,9 @@ function getNotificationDb() {
     pool: getPool(),
     schema: 'public',
     // gateway URL kept only for completeness; notification code uses .from only
-    restUrl: process.env.NOTIFICATION_SUPABASE_URL || process.env.SUPABASE_URL,
-    serviceKey: process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY,
-    anonKey: process.env.NOTIFICATION_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY,
+    restUrl: process.env.NOTIFY_GATEWAY_URL || process.env.DATA_GATEWAY_URL,
+    serviceKey: process.env.DATA_GATEWAY_SERVICE_KEY || process.env.DATA_GATEWAY_SERVICE_ROLE_KEY,
+    anonKey: process.env.NOTIFY_GATEWAY_ANON_KEY || process.env.DATA_GATEWAY_ANON_KEY,
   });
 }
 

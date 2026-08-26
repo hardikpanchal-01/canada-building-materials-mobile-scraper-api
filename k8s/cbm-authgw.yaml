@@ -1,6 +1,6 @@
 # cbm-authgw — per-tenant PostgREST gateway fronting the SHARED central_auth DB,
 # mirroring superior-authgw / pm-authgw. The mobile API's central-auth client
-# (AUTH_SUPABASE_URL) talks to this over a PostgREST /rest/v1 surface,
+# (AUTH_GATEWAY_URL) talks to this over a PostgREST /rest/v1 surface,
 # so federated auth works with NO app code changes.
 #   - cbm-authgw-postgrest : PostgREST → central_auth (role auth_app), schemas public,auth_tenant
 #   - cbm-authgw           : nginx, maps /rest/v1/* → postgrest (PostgREST REST shape)

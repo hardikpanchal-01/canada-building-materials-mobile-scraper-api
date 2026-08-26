@@ -6,8 +6,8 @@
  */
 
 // Configuration
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_SERVICE_KEY;
+const DATA_GATEWAY_URL = process.env.DATA_GATEWAY_URL;
+const DATA_GATEWAY_ANON_KEY = process.env.DATA_GATEWAY_ANON_KEY || process.env.DATA_GATEWAY_SERVICE_KEY;
 const BUSINESS_TIMEZONE = process.env.BUSINESS_TIMEZONE || 'America/Chicago';
 const EMAIL_TIME_WINDOW_ENABLED = process.env.EMAIL_TIME_WINDOW_ENABLED !== 'false';
 const EMAIL_TIME_WINDOW_BUFFER_MINUTES = parseInt(process.env.EMAIL_TIME_WINDOW_BUFFER_MINUTES) || 0;
@@ -55,7 +55,7 @@ function formatTimeInTimezone(date = new Date()) {
  * @returns {Promise<Object>} Truck times response
  */
 async function getDailyTruckTimes(date) {
-  if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
+  if (!DATA_GATEWAY_URL || !DATA_GATEWAY_ANON_KEY) {
     console.error('Postgres configuration missing for truck times API');
     return {
       date,
@@ -76,12 +76,12 @@ async function getDailyTruckTimes(date) {
     const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
 
     const response = await fetch(
-      `${SUPABASE_URL}/functions/v1/get-daily-truck-times?date=${date}`,
+      `${DATA_GATEWAY_URL}/functions/v1/get-daily-truck-times?date=${date}`,
       {
         method: 'GET',
         headers: {
-          'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
-          'apikey': SUPABASE_ANON_KEY,
+          'Authorization': `Bearer ${DATA_GATEWAY_ANON_KEY}`,
+          'apikey': DATA_GATEWAY_ANON_KEY,
           'Content-Type': 'application/json',
         },
         signal: controller.signal

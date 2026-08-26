@@ -30,7 +30,7 @@ function getCentralAuthPool() {
   // connection-string `sslmode` (require/prefer/verify-ca) as an alias for
   // `verify-full`, which rejects the self-signed chain and overrides an `ssl`
   // option. So STRIP sslmode from the string and make our explicit TLS-no-verify
-  // config authoritative (the estate's proven fix — see the remove-supabase
+  // config authoritative (the estate's proven fix — see the remove-gateway
   // runbook). TLS stays ON; only hostname/CA verification is disabled.
   const connectionString = url
     .replace(/([?&])sslmode=[^&]*/gi, '$1')

@@ -33,11 +33,10 @@ if (DATABASE_URL) {
     idleTimeoutMillis: 60000,
     connectionTimeoutMillis: 15000,
     statement_timeout: QUERY_TIMEOUT_MS,  // Kill queries exceeding this time
-    // SSL configuration for Postgres
-    // Host-detection heuristic (a stored VALUE, not an SDK reference): hosted
-    // *.supabase.com poolers need TLS-no-verify; the CNPG/NLB host connects per
-    // its own sslmode. Preserved verbatim so SSL behaviour is byte-identical.
-    ssl: DATABASE_URL.includes('supabase') ? { rejectUnauthorized: false } : false
+    // SSL: this tenant's DATABASE_URL is the CNPG NLB host, which connects
+    // without client TLS (the verified live behaviour). If DATABASE_URL is ever
+    // repointed at a TLS-requiring host, enable ssl:{ rejectUnauthorized:false }.
+    ssl: /sslmode=require\b|sslmode=verify-full\b/.test(DATABASE_URL) ? { rejectUnauthorized: false } : false
   });
 
   // Log pool errors (short message only; full dump is noisy for "Connection terminated unexpectedly")
