@@ -15,15 +15,15 @@ const { makeClient } = require('../db/client');
 const { getPool } = require('../services/database/postgresClient');
 
 // Gateway base URL + keys (self-hosted REST/auth/storage gateway).
-// SUPABASE_URL / *_KEY names are kept because they are also part of the frozen
+// DATA_GATEWAY_URL / *_KEY names are kept because they are also part of the frozen
 // mobile-app config contract (see mobileAuthService.js) and the deployment
 // secret sets them — renaming the env keys would orphan the live values.
-const REST_URL = process.env.SUPABASE_URL;
-const SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
-const ANON_KEY = process.env.SUPABASE_ANON_KEY;
+const REST_URL = process.env.DATA_GATEWAY_URL;
+const SERVICE_KEY = process.env.DATA_GATEWAY_SERVICE_KEY || process.env.DATA_GATEWAY_SERVICE_ROLE_KEY;
+const ANON_KEY = process.env.DATA_GATEWAY_ANON_KEY;
 
 if (!REST_URL) {
-  console.warn('⚠️  Data gateway URL (SUPABASE_URL) not configured. RPC/auth/storage calls will be unavailable.');
+  console.warn('⚠️  Data gateway URL (DATA_GATEWAY_URL) not configured. RPC/auth/storage calls will be unavailable.');
 }
 
 function client() {

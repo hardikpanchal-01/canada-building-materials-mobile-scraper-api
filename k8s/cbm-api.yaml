@@ -1,10 +1,10 @@
 # Canada Building Materials Mobile/Scraper API — mirrors superior-api / pm-api.
 #
 # Config is layered (envFrom order = api-env first, core-env LAST so core wins):
-#   - cbm-api-env  : API-only keys (AUTH_SUPABASE=cbm-authgw, JWT, ENCRYPTION_KEY,
+#   - cbm-api-env  : API-only keys (AUTH_GATEWAY_URL=cbm-authgw, JWT, ENCRYPTION_KEY,
 #                    tenant cfg, ANTHROPIC_API_KEY, API_BASE_URL)
-#   - cbm-core-env : the migrated CORE (CNPG DATABASE_URL, SUPABASE_URL=cbm-rest-gateway,
-#                    SUPABASE_SERVICE_KEY, SMTP, TWILIO)
+#   - cbm-core-env : the migrated CORE (CNPG DATABASE_URL, DATA_GATEWAY_URL=cbm-rest-gateway,
+#                    DATA_GATEWAY_SERVICE_KEY, SMTP, TWILIO)
 # Federated auth reaches the SHARED central_auth via cbm-authgw (see cbm-authgw.yaml).
 # Isolated & reversible: `kubectl -n cbm delete -f k8s/cbm-api.yaml`.
 apiVersion: apps/v1

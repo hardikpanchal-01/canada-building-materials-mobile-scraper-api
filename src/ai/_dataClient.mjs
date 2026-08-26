@@ -16,11 +16,11 @@ const require = createRequire(import.meta.url);
 const { makeClient } = require('../db/client.js');
 const { getPool } = require('../services/database/postgresClient.js');
 
-const restUrl = process.env.SUPABASE_URL;
+const restUrl = process.env.DATA_GATEWAY_URL;
 const serviceKey =
-  process.env.SUPABASE_SERVICE_KEY ||
-  process.env.SUPABASE_SERVICE_ROLE_KEY ||
-  process.env.SUPABASE_ANON_KEY;
+  process.env.DATA_GATEWAY_SERVICE_KEY ||
+  process.env.DATA_GATEWAY_SERVICE_ROLE_KEY ||
+  process.env.DATA_GATEWAY_ANON_KEY;
 
 if (!restUrl) {
   console.warn('[ai/_data] Data gateway URL is not set — AI rpc tools will fail.');
@@ -31,7 +31,7 @@ export const dbServer = makeClient({
   schema: 'public',
   restUrl,
   serviceKey,
-  anonKey: process.env.SUPABASE_ANON_KEY,
+  anonKey: process.env.DATA_GATEWAY_ANON_KEY,
 });
 
 export default dbServer;

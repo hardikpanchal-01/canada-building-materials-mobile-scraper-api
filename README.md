@@ -15,7 +15,7 @@ A unified Node.js Express API combining Mobile Backend and Scraper API functiona
 - **Data Validation**: Comprehensive validation with detailed error reporting
 - **Order Comparison**: Automatic comparison with system database
 - **Email Notifications**: Comparison report emails with HTML formatting
-- **Storage**: Supabase Storage for JSON file storage
+- **Storage**: Postgres Storage for JSON file storage
 - **Database**: PostgreSQL for tracking imports and comparisons
 - **API Documentation**: Swagger/OpenAPI documentation
 
@@ -24,8 +24,8 @@ A unified Node.js Express API combining Mobile Backend and Scraper API functiona
 Before setting up the project, ensure you have:
 
 - **Node.js 18+** installed on your system
-- **Supabase account** with a project created
-- **PostgreSQL database** (can be Supabase PostgreSQL) - Optional for scraper features
+- **Postgres account** with a project created
+- **PostgreSQL database** (can be Postgres PostgreSQL) - Optional for scraper features
 - **Firebase project** with FCM enabled - Required for push notifications
 - **SMTP server** credentials (optional, for email notifications)
 
@@ -43,10 +43,10 @@ Create a `.env` file in the root directory and configure the following variables
 
 #### Required Variables
 
-**Supabase Configuration:**
-- `SUPABASE_URL` - Your Supabase project URL
-- `SUPABASE_ANON_KEY` - Supabase anonymous key (for mobile backend)
-- `SUPABASE_SERVICE_KEY` - Supabase service role key (for scraper storage features)
+**Postgres Configuration:**
+- `DATA_GATEWAY_URL` - Your Postgres project URL
+- `DATA_GATEWAY_ANON_KEY` - Postgres anonymous key (for mobile backend)
+- `DATA_GATEWAY_SERVICE_KEY` - Postgres service role key (for scraper storage features)
 
 **JWT Configuration:**
 - `JWT_SECRET` - Secret key for access tokens (generate a secure random key)
@@ -177,9 +177,9 @@ x-scraper-api-key: <your-api-key>
 
 ## Configuration Details
 
-### Supabase Setup
+### Postgres Setup
 
-1. Create a Supabase project at https://supabase.com
+1. Create a Postgres project at https://gateway.com
 2. Go to Settings > API to find your project URL and keys
 3. For scraper features, create a storage bucket named `scraped-orders`
 4. Set the bucket to public or configure appropriate access policies
@@ -199,8 +199,8 @@ The `DATABASE_URL` should be in the following format:
 postgresql://username:password@host:port/database
 ```
 
-For Supabase PostgreSQL, you can find the connection string in:
-- Supabase Dashboard > Settings > Database > Connection string > URI
+For Postgres PostgreSQL, you can find the connection string in:
+- Postgres Dashboard > Settings > Database > Connection string > URI
 
 ### Email Configuration
 
@@ -313,8 +313,8 @@ Configure your load balancer to use:
 - Ensure database credentials are correct
 - Note: Database is optional for scraper features - API will continue without it
 
-**Supabase Storage Errors**
-- Verify `SUPABASE_URL` and `SUPABASE_SERVICE_KEY` are correct
+**Postgres Storage Errors**
+- Verify `DATA_GATEWAY_URL` and `DATA_GATEWAY_SERVICE_KEY` are correct
 - Check if the storage bucket exists and has proper permissions
 - Ensure the service role key has storage access
 
@@ -348,7 +348,7 @@ Configure your load balancer to use:
 ├── package.json           # Dependencies and scripts
 ├── src/
 │   ├── config/            # Configuration files
-│   │   ├── database.js        # Supabase configuration
+│   │   ├── database.js        # Postgres configuration
 │   │   ├── Firebase.js        # Firebase Admin SDK
 │   │   ├── jwt.js             # JWT configuration
 │   │   ├── swaggerScraper.js  # Swagger/OpenAPI config for Scraper API
@@ -374,12 +374,11 @@ Configure your load balancer to use:
 │   │   ├── orderComparisonService.js
 │   │   └── database/
 │   │       ├── postgresClient.js
-│   │       ├── supabaseClient.js
+│   │       ├── storageClient.js
 │   │       ├── scrapedOrderDatabaseService.js
 │   │       └── comparisonDatabaseService.js
 │   └── utils/              # Utility functions
 │       ├── jwtUtils.js
-│       ├── supabaseHelper.js
 │       ├── postgresExecutor.js
 │       └── scrapedOrderValidation.js
 └── README.md               # This file

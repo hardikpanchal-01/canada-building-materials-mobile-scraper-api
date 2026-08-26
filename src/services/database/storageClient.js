@@ -10,8 +10,8 @@
 
 const { makeStorage } = require('../../db/restFetch');
 
-const STORAGE_URL = process.env.SUPABASE_URL;
-const STORAGE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_ANON_KEY;
+const STORAGE_URL = process.env.DATA_GATEWAY_URL;
+const STORAGE_SERVICE_KEY = process.env.DATA_GATEWAY_SERVICE_KEY || process.env.DATA_GATEWAY_ANON_KEY;
 
 // Storage timeout configuration (default: 30 seconds)
 const STORAGE_TIMEOUT_MS = parseInt(process.env.STORAGE_TIMEOUT_MS) || 30000;
@@ -40,7 +40,7 @@ const AVATARS_BUCKET = 'avatars';
  */
 async function uploadToStorage(fileName, data, timeoutMs = STORAGE_TIMEOUT_MS) {
   if (!storage) {
-    throw new Error('Storage client not configured. Please set SUPABASE_URL and SUPABASE_SERVICE_KEY.');
+    throw new Error('Storage client not configured. Please set DATA_GATEWAY_URL and DATA_GATEWAY_SERVICE_KEY.');
   }
 
   const jsonContent = JSON.stringify(data, null, 2);
@@ -97,7 +97,7 @@ async function uploadToStorage(fileName, data, timeoutMs = STORAGE_TIMEOUT_MS) {
  */
 async function uploadAvatarToStorage(userId, fileBuffer, mimeType, originalName) {
   if (!storage) {
-    throw new Error('Storage client not configured. Please set SUPABASE_URL and SUPABASE_SERVICE_KEY.');
+    throw new Error('Storage client not configured. Please set DATA_GATEWAY_URL and DATA_GATEWAY_SERVICE_KEY.');
   }
 
   const ext = originalName.split('.').pop().toLowerCase();
