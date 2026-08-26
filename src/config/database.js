@@ -1,57 +1,53 @@
-const { createClient } = require('@supabase/supabase-js');
+/**
+ * Main tenant data client.
+ *
+ * Table CRUD runs on DIRECT Postgres (the tenant's own database via the shared
+ * pool in services/database/postgresClient.js). Database functions (.rpc), the
+ * GoTrue auth admin surface (.auth) and object storage (.storage) are served by
+ * thin fetch clients against the tenant's self-hosted gateway. No hosted
+ * data-API SDK is involved.
+ *
+ * getDb() / getDbAdmin() keep their names and `{ data, error }`
+ * return contract so the 24 call sites are unchanged.
+ */
 
-// Supabase configuration
-const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseAnonKey = process.env.SUPABASE_ANON_KEY;
-const supabaseServiceKey = process.env.SUPABASE_SERVICE_KEY;
+const { makeClient } = require('../db/client');
+const { getPool } = require('../services/database/postgresClient');
 
-let supabase = null; // Regular client (uses anon key, respects RLS)
-let supabaseAdmin = null; // Admin client (uses service key, bypasses RLS)
+// Gateway base URL + keys (self-hosted REST/auth/storage gateway).
+// SUPABASE_URL / *_KEY names are kept because they are also part of the frozen
+// mobile-app config contract (see mobileAuthService.js) and the deployment
+// secret sets them — renaming the env keys would orphan the live values.
+const REST_URL = process.env.SUPABASE_URL;
+const SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
+const ANON_KEY = process.env.SUPABASE_ANON_KEY;
 
-// Initialize regular Supabase client (with anon key)
-if (supabaseUrl && supabaseAnonKey && 
-    supabaseUrl !== 'your_supabase_project_url' && 
-    supabaseAnonKey !== 'your_supabase_anon_key') {
-  supabase = createClient(supabaseUrl, supabaseAnonKey);
-} else {
-  console.warn('⚠️  Supabase credentials not configured. Please update your .env file with your Supabase URL and API key.');
+if (!REST_URL) {
+  console.warn('⚠️  Data gateway URL (SUPABASE_URL) not configured. RPC/auth/storage calls will be unavailable.');
 }
 
-// Initialize admin Supabase client (with service key for admin operations)
-if (supabaseUrl && supabaseServiceKey && 
-    supabaseUrl !== 'your_supabase_project_url' && 
-    supabaseServiceKey !== 'your_supabase_service_key') {
-  supabaseAdmin = createClient(supabaseUrl, supabaseServiceKey, {
-    auth: {
-      autoRefreshToken: false,
-      persistSession: false
-    }
+function client() {
+  return makeClient({
+    pool: getPool(),
+    schema: 'public',
+    restUrl: REST_URL,
+    serviceKey: SERVICE_KEY,
+    anonKey: ANON_KEY,
   });
-} else if (supabaseUrl && supabaseAnonKey) {
-  // Fallback to anon key if service key not available (for development)
-  console.warn('⚠️  SUPABASE_SERVICE_KEY not configured. Using anon key for admin operations (may fail with RLS).');
-  supabaseAdmin = supabase;
 }
 
-// Export a function that ensures Supabase is initialized
-function getSupabase() {
-  if (!supabase) {
-    throw new Error('Supabase is not configured. Please set SUPABASE_URL and SUPABASE_ANON_KEY in your .env file.');
-  }
-  return supabase;
+// Regular client (formerly anon key). Direct pg has no RLS layer — matches the
+// service-gateway behaviour already in use across this API.
+function getDb() {
+  return client();
 }
 
-// Export admin client for operations that need to bypass RLS
-function getSupabaseAdmin() {
-  if (!supabaseAdmin) {
-    throw new Error('Supabase admin client is not configured. Please set SUPABASE_SERVICE_KEY in your .env file for admin operations.');
-  }
-  return supabaseAdmin;
+// Admin client (service role — full access).
+function getDbAdmin() {
+  return client();
 }
 
 module.exports = {
-  getSupabase,
-  getSupabaseAdmin
+  getDb,
+  getDbAdmin,
 };
-
-

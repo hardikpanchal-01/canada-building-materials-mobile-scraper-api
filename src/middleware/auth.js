@@ -1,6 +1,6 @@
 const { verifyAccessToken } = require('../utils/jwtUtils');
 const { executeDirectSQL } = require('../utils/postgresExecutor');
-const { getAuthSupabaseAdmin } = require('../config/authDatabase');
+const { getAuthDbAdmin } = require('../config/authDatabase');
 
 // Admin role code - same as web app (/src/lib/admin-check.ts)
 const ADMIN_ROLE_CODE = 'tk-admin';
@@ -181,14 +181,14 @@ async function getAllowedCustomerIdsForUser(userId) {
  * Resolve a UUID user ID to the integer ID used in tenant_users.
  * If the userId is already numeric, returns it as-is.
  */
-async function resolveUserId(supabase, userId) {
+async function resolveUserId(dbClient, userId) {
   // If already a number, return directly
   if (typeof userId === 'number' || /^\d+$/.test(userId)) {
     return Number(userId);
   }
 
   // UUID — look up integer id from auth_tenant.users
-  const { data, error } = await supabase
+  const { data, error } = await dbClient
     .schema('auth_tenant')
     .from('users')
     .select('id')
@@ -214,14 +214,14 @@ const DEFAULT_TIMEZONE = { iana: 'America/Chicago' };
 
 async function getTenantTimezoneForUser(userId) {
   try {
-    const supabase = getAuthSupabaseAdmin();
+    const dbClient = getAuthDbAdmin();
 
     // Resolve UUID to integer user ID if needed
-    const numericUserId = await resolveUserId(supabase, userId);
+    const numericUserId = await resolveUserId(dbClient, userId);
     if (!numericUserId) return DEFAULT_TIMEZONE;
 
     // Step 1: Get tenant_id from tenant_users
-    const { data: tuData, error: tuError } = await supabase
+    const { data: tuData, error: tuError } = await dbClient
       .schema('auth_tenant')
       .from('tenant_users')
       .select('tenant_id')
@@ -234,7 +234,7 @@ async function getTenantTimezoneForUser(userId) {
     }
 
     // Step 2: Get timezone from tenants
-    const { data: tData, error: tError } = await supabase
+    const { data: tData, error: tError } = await dbClient
       .schema('auth_tenant')
       .from('tenants')
       .select('timezone')
@@ -267,14 +267,14 @@ async function getTenantTimezoneForUser(userId) {
  */
 async function getTenantShowRegionForUser(userId) {
   try {
-    const supabase = getAuthSupabaseAdmin();
+    const dbClient = getAuthDbAdmin();
 
     // Resolve UUID to integer user ID if needed
-    const numericUserId = await resolveUserId(supabase, userId);
+    const numericUserId = await resolveUserId(dbClient, userId);
     if (!numericUserId) return false;
 
     // Step 1: Get tenant_id from tenant_users
-    const { data: tuData, error: tuError } = await supabase
+    const { data: tuData, error: tuError } = await dbClient
       .schema('auth_tenant')
       .from('tenant_users')
       .select('tenant_id')
@@ -290,7 +290,7 @@ async function getTenantShowRegionForUser(userId) {
     console.log('[AccessControl] show_regions: found tenant_id:', tuData[0].tenant_id, 'for userId:', userId);
 
     // Step 2: Get show_regions from tenants
-    const { data: tData, error: tError } = await supabase
+    const { data: tData, error: tError } = await dbClient
       .schema('auth_tenant')
       .from('tenants')
       .select('show_regions')
@@ -618,9 +618,9 @@ async function authenticate(req, res, next) {
         if (cachedTz && (Date.now() - cachedTz.ts) < TZ_PREF_CACHE_TTL_MS) {
           if (cachedTz.iana) req.user.timezone = { iana: cachedTz.iana };
         } else {
-          const { getSupabaseAdmin } = require('../config/database');
-          const supabase = getSupabaseAdmin();
-          const { data: prefRow } = await supabase
+          const { getDbAdmin } = require('../config/database');
+          const dbClient = getDbAdmin();
+          const { data: prefRow } = await dbClient
             .from('user_preferences')
             .select('preference_value')
             .eq('user_id', decoded.id)
@@ -639,7 +639,7 @@ async function authenticate(req, res, next) {
               // Numeric ID — look up iana_code from timezones table
               const tzId = typeof pv === 'number' ? pv : Number(pv);
               if (!isNaN(tzId)) {
-                const { data: tzRow } = await supabase
+                const { data: tzRow } = await dbClient
                   .from('timezones')
                   .select('iana_code')
                   .eq('id', tzId)

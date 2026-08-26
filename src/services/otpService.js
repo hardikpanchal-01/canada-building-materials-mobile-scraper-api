@@ -1,13 +1,13 @@
 /**
  * OTP Service
  *
- * Handles OTP generation, storage (in Supabase), email sending (SMTP/nodemailer),
+ * Handles OTP generation, storage (in Postgres), email sending (SMTP/nodemailer),
  * and phone sending (Twilio). Includes expiry, retry limits, and cooldown logic.
  */
 
 const crypto = require('crypto');
 const nodemailer = require('nodemailer');
-const { getSupabaseAdmin } = require('../config/database');
+const { getDbAdmin } = require('../config/database');
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -80,7 +80,7 @@ function hashOtp(otp) {
 }
 
 // ---------------------------------------------------------------------------
-// Supabase OTP table helpers
+// Postgres OTP table helpers
 // Table: signup_otps (auto-created via migration or manually)
 //   id (uuid, pk), identifier (text), type (text: 'email'|'phone'),
 //   otp_hash (text), expires_at (timestamptz), attempts (int default 0),
@@ -94,10 +94,10 @@ function hashOtp(otp) {
  * @returns {{ allowed: boolean, waitSeconds?: number, error?: string }}
  */
 async function checkSendLimits(identifier, type) {
-  const supabase = getSupabaseAdmin();
+  const dbClient = getDbAdmin();
 
   // Get most recent OTP for this identifier+type
-  const { data: recent } = await supabase
+  const { data: recent } = await dbClient
     .from('signup_otps')
     .select('created_at')
     .eq('identifier', identifier)
@@ -116,7 +116,7 @@ async function checkSendLimits(identifier, type) {
 
   // Check hourly send limit
   const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
-  const { count } = await supabase
+  const { count } = await dbClient
     .from('signup_otps')
     .select('id', { count: 'exact', head: true })
     .eq('identifier', identifier)
@@ -137,10 +137,10 @@ async function checkSendLimits(identifier, type) {
  * @param {string} otp - Plain-text OTP (hashed before storage)
  */
 async function storeOtp(identifier, type, otp) {
-  const supabase = getSupabaseAdmin();
+  const dbClient = getDbAdmin();
 
   // Invalidate previous unverified OTPs for this identifier+type
-  await supabase
+  await dbClient
     .from('signup_otps')
     .delete()
     .eq('identifier', identifier)
@@ -149,7 +149,7 @@ async function storeOtp(identifier, type, otp) {
 
   const expiresAt = new Date(Date.now() + OTP_EXPIRY_MINUTES * 60 * 1000).toISOString();
 
-  const { error } = await supabase
+  const { error } = await dbClient
     .from('signup_otps')
     .insert({
       identifier,
@@ -174,10 +174,10 @@ async function storeOtp(identifier, type, otp) {
  * @returns {{ success: boolean, error?: string, code?: string }}
  */
 async function verifyOtp(identifier, type, otp) {
-  const supabase = getSupabaseAdmin();
+  const dbClient = getDbAdmin();
 
   // Fetch the latest unverified OTP for this identifier+type
-  const { data: records } = await supabase
+  const { data: records } = await dbClient
     .from('signup_otps')
     .select('*')
     .eq('identifier', identifier)
@@ -194,20 +194,20 @@ async function verifyOtp(identifier, type, otp) {
 
   // Check expiry
   if (new Date(record.expires_at) < new Date()) {
-    await supabase.from('signup_otps').delete().eq('id', record.id);
+    await dbClient.from('signup_otps').delete().eq('id', record.id);
     return { success: false, error: 'OTP has expired. Please request a new one.', code: 'OTP_EXPIRED' };
   }
 
   // Check max attempts
   if (record.attempts >= OTP_MAX_ATTEMPTS) {
-    await supabase.from('signup_otps').delete().eq('id', record.id);
+    await dbClient.from('signup_otps').delete().eq('id', record.id);
     return { success: false, error: 'Too many failed attempts. Please request a new OTP.', code: 'MAX_ATTEMPTS' };
   }
 
   // Compare hashes
   if (record.otp_hash !== hashOtp(otp)) {
     // Increment attempts
-    await supabase
+    await dbClient
       .from('signup_otps')
       .update({ attempts: record.attempts + 1 })
       .eq('id', record.id);
@@ -221,7 +221,7 @@ async function verifyOtp(identifier, type, otp) {
   }
 
   // Mark as verified
-  await supabase
+  await dbClient
     .from('signup_otps')
     .update({ verified: true })
     .eq('id', record.id);
@@ -236,8 +236,8 @@ async function verifyOtp(identifier, type, otp) {
  * @returns {boolean}
  */
 async function isVerified(identifier, type) {
-  const supabase = getSupabaseAdmin();
-  const { data } = await supabase
+  const dbClient = getDbAdmin();
+  const { data } = await dbClient
     .from('signup_otps')
     .select('id')
     .eq('identifier', identifier)

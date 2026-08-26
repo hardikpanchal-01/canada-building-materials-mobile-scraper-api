@@ -7,7 +7,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { supabaseServer } from './_supabase.mjs';
+import { dbServer } from './_dataClient.mjs';
 import { executeAggregate, executeCount } from './query-executor.mjs';
 import { resolveRelativeDateRange } from './date-resolver.mjs';
 
@@ -38,7 +38,7 @@ async function loadOrComputeBaseline(body) {
   if (body.method === 'avg') return null;
 
   const key = metricKey(body);
-  const { data: cached } = await supabaseServer
+  const { data: cached } = await dbServer
     .from('ai_metric_baselines')
     .select('baseline_mean, baseline_stddev, sample_size, computed_at')
     .eq('metric_key', key)
@@ -94,7 +94,7 @@ async function loadOrComputeBaseline(body) {
     values.reduce((acc, v) => acc + Math.pow(v - mean, 2), 0) / values.length;
   const stddev = Math.sqrt(variance);
 
-  await supabaseServer.from('ai_metric_baselines').upsert(
+  await dbServer.from('ai_metric_baselines').upsert(
     {
       metric_key: key,
       table_name: body.table,

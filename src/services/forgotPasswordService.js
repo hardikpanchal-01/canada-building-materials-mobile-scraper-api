@@ -4,11 +4,11 @@
  * Handles password reset requests with:
  * - Rate limiting (5 minutes per email)
  * - User verification
- * - Token generation via Supabase Admin API
+ * - Token generation via Postgres Admin API
  * - Password reset email sending
  */
 
-const { getSupabaseAdmin } = require('../config/database');
+const { getDbAdmin } = require('../config/database');
 const { executeDirectSQL } = require('../utils/postgresExecutor');
 const nodemailer = require('nodemailer');
 
@@ -50,7 +50,7 @@ function setRateLimit(email) {
 
 /**
  * Verify if user exists in the system
- * First checks users table, then falls back to Supabase auth.users
+ * First checks users table, then falls back to Postgres auth.users
  * @param {string} email - User email
  * @returns {object|null} User data or null if not found
  */
@@ -76,8 +76,8 @@ async function verifyUserExists(email) {
       };
     }
 
-    // Step 2: Fall back to checking auth.users via Supabase Admin API
-    const supabaseAdmin = getSupabaseAdmin();
+    // Step 2: Fall back to checking auth.users via Postgres Admin API
+    const dbAdmin = getDbAdmin();
 
     // Paginated listUsers to avoid loading ALL users into memory
     let page = 1;
@@ -85,7 +85,7 @@ async function verifyUserExists(email) {
     let authUser = null;
 
     while (!authUser) {
-      const { data: authData, error: authError } = await supabaseAdmin.auth.admin.listUsers({
+      const { data: authData, error: authError } = await dbAdmin.auth.admin.listUsers({
         page,
         perPage
       });
@@ -123,7 +123,7 @@ async function verifyUserExists(email) {
 }
 
 /**
- * Generate password reset token using Supabase Admin API
+ * Generate password reset token using Postgres Admin API
  * @param {string} email - User email
  * @param {string} redirectTo - URL to redirect after password reset
  * @returns {object} { success: boolean, token?: string, error?: string }
@@ -132,10 +132,10 @@ async function generateResetToken(email, redirectTo) {
   const normalizedEmail = email.toLowerCase().trim();
 
   try {
-    const supabaseAdmin = getSupabaseAdmin();
+    const dbAdmin = getDbAdmin();
 
-    // Generate recovery link using Supabase Admin API
-    const { data, error } = await supabaseAdmin.auth.admin.generateLink({
+    // Generate recovery link using Postgres Admin API
+    const { data, error } = await dbAdmin.auth.admin.generateLink({
       type: 'recovery',
       email: normalizedEmail,
       options: {

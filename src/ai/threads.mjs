@@ -1,13 +1,13 @@
 /**
  * AI Assistant chat-thread persistence (ported from the web app's
  * /api/ai/threads routes). All queries are scoped to the authenticated
- * user's id (the Supabase auth UUID carried in the backend JWT).
+ * user's id (the Postgres auth UUID carried in the backend JWT).
  */
 
-import { supabaseServer } from './_supabase.mjs';
+import { dbServer } from './_dataClient.mjs';
 
 export async function listThreads(userId) {
-  const { data, error } = await supabaseServer
+  const { data, error } = await dbServer
     .from('ai_chat_threads')
     .select('id, title, updated_at, created_at')
     .eq('user_id', userId)
@@ -18,7 +18,7 @@ export async function listThreads(userId) {
 }
 
 export async function createThread(userId) {
-  const { data, error } = await supabaseServer
+  const { data, error } = await dbServer
     .from('ai_chat_threads')
     .insert({ user_id: userId, messages: [] })
     .select('id, title, updated_at, created_at')
@@ -28,7 +28,7 @@ export async function createThread(userId) {
 }
 
 export async function getThread(userId, id) {
-  const { data, error } = await supabaseServer
+  const { data, error } = await dbServer
     .from('ai_chat_threads')
     .select('id, title, messages, updated_at, created_at')
     .eq('id', id)
@@ -46,7 +46,7 @@ export async function saveThread(userId, id, { messages, title }) {
   if (Array.isArray(messages)) patch.messages = messages;
   if (typeof title === 'string') patch.title = title;
 
-  const { data, error } = await supabaseServer
+  const { data, error } = await dbServer
     .from('ai_chat_threads')
     .update(patch)
     .eq('id', id)
@@ -58,7 +58,7 @@ export async function saveThread(userId, id, { messages, title }) {
 }
 
 export async function deleteThread(userId, id) {
-  const { error } = await supabaseServer
+  const { error } = await dbServer
     .from('ai_chat_threads')
     .delete()
     .eq('id', id)

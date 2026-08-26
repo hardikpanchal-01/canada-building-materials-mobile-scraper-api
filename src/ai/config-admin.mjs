@@ -6,7 +6,7 @@
  * Admin gating is enforced at the route layer via req.user.isAdmin.
  */
 
-import { supabaseServer } from './_supabase.mjs';
+import { dbServer } from './_dataClient.mjs';
 import {
   getAiSettings,
   getMonthToDateTokens,
@@ -75,7 +75,7 @@ async function resolveUsers(ids) {
   const map = {};
   if (ids.size === 0) return map;
   try {
-    const { data } = await supabaseServer.auth.admin.listUsers({ page: 1, perPage: 1000 });
+    const { data } = await dbServer.auth.admin.listUsers({ page: 1, perPage: 1000 });
     for (const u of data?.users ?? []) {
       if (!ids.has(u.id)) continue;
       const meta = u.user_metadata ?? {};
@@ -93,7 +93,7 @@ export async function getUsage(fromISO, toISO) {
   const to = toISO ? new Date(toISO) : new Date();
   const from = fromISO ? new Date(fromISO) : new Date(to.getTime() - 30 * 24 * 60 * 60 * 1000);
 
-  const { data, error } = await supabaseServer
+  const { data, error } = await dbServer
     .from('ai_token_usage')
     .select('user_id, model_id, question, input_tokens, output_tokens, total_tokens, estimated_cost, created_at')
     .gte('created_at', from.toISOString())
@@ -129,7 +129,7 @@ export async function getUsage(fromISO, toISO) {
 
   let accessIds = [];
   try {
-    const accessRes = await supabaseServer
+    const accessRes = await dbServer
       .from('user_app_permissions')
       .select('user_id')
       .eq('permission_code', 'ai_assistant');

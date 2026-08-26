@@ -1,10 +1,10 @@
-const { getSupabase, getSupabaseAdmin } = require('../config/database');
+const { getDb, getDbAdmin } = require('../config/database');
 const { generateAccessToken, generateRefreshToken, verifyAccessToken, verifyRefreshToken } = require('../utils/jwtUtils');
 const deviceService = require('./deviceService');
 const { loadUserAccessData } = require('../middleware/auth');
 
 /**
- * Login with email and password using Supabase Auth
+ * Login with email and password using Postgres Auth
  * @param {string} email - User email
  * @param {string} password - User password
  * @param {Object} deviceInfo - Optional device information
@@ -12,8 +12,8 @@ const { loadUserAccessData } = require('../middleware/auth');
  */
 async function loginWithEmail(email, password, deviceInfo = null) {
   try {
-    const supabase = getSupabase();
-    const supabaseAdmin = getSupabaseAdmin();
+    const dbClient = getDb();
+    const dbAdmin = getDbAdmin();
     const normalizedEmail = email.toLowerCase().trim();
 
     // ---------------------------------------------------------------
@@ -21,7 +21,7 @@ async function loginWithEmail(email, password, deviceInfo = null) {
     // ---------------------------------------------------------------
 
     // Check if user is still in signup_pending (incomplete signup)
-    const { data: pendingSignup } = await supabaseAdmin
+    const { data: pendingSignup } = await dbAdmin
       .from('signup_pending')
       .select('email_verified, phone_number, phone_country_code')
       .eq('email', normalizedEmail)
@@ -40,7 +40,7 @@ async function loginWithEmail(email, password, deviceInfo = null) {
     }
 
     // Check if user exists in database
-    const { data: userProfile } = await supabaseAdmin
+    const { data: userProfile } = await dbAdmin
       .from('users')
       .select('active, user_type')
       .eq('email', normalizedEmail)
@@ -57,9 +57,9 @@ async function loginWithEmail(email, password, deviceInfo = null) {
     }
 
     // ---------------------------------------------------------------
-    // Authenticate with Supabase Auth
+    // Authenticate with Postgres Auth
     // ---------------------------------------------------------------
-    const { data, error } = await supabase.auth.signInWithPassword({
+    const { data, error } = await dbClient.auth.signInWithPassword({
       email: normalizedEmail,
       password
     });
@@ -112,7 +112,7 @@ async function loginWithEmail(email, password, deviceInfo = null) {
 }
 
 /**
- * Login with phone and password using Supabase Auth
+ * Login with phone and password using Postgres Auth
  * @param {string} phone - User phone number
  * @param {string} password - User password
  * @param {Object} deviceInfo - Optional device information
@@ -120,18 +120,18 @@ async function loginWithEmail(email, password, deviceInfo = null) {
  */
 async function loginWithPhone(phone, password, deviceInfo = null) {
   try {
-    const supabase = getSupabase();
-    const supabaseAdmin = getSupabaseAdmin();
+    const dbClient = getDb();
+    const dbAdmin = getDbAdmin();
 
     // ---------------------------------------------------------------
     // Pre-auth check: block users pending admin approval
     // Look up email from auth user by phone, then check public.users.active
     // ---------------------------------------------------------------
-    const { data: authUsers } = await supabaseAdmin.auth.admin.listUsers({ page: 1, perPage: 1000 });
+    const { data: authUsers } = await dbAdmin.auth.admin.listUsers({ page: 1, perPage: 1000 });
     if (authUsers?.users) {
       const matchedAuth = authUsers.users.find(u => u.phone === phone);
       if (matchedAuth?.email) {
-        const { data: userProfile } = await supabaseAdmin
+        const { data: userProfile } = await dbAdmin
           .from('users')
           .select('active')
           .eq('email', matchedAuth.email.toLowerCase())
@@ -144,9 +144,9 @@ async function loginWithPhone(phone, password, deviceInfo = null) {
     }
 
     // ---------------------------------------------------------------
-    // Authenticate with Supabase Auth using phone
+    // Authenticate with Postgres Auth using phone
     // ---------------------------------------------------------------
-    const { data, error } = await supabase.auth.signInWithPassword({
+    const { data, error } = await dbClient.auth.signInWithPassword({
       phone,
       password
     });
@@ -206,7 +206,7 @@ async function loginWithPhone(phone, password, deviceInfo = null) {
  */
 async function logout(userId, accessToken, deviceToken = null) {
   try {
-    const supabase = getSupabase();
+    const dbClient = getDb();
     
     // Deactivate device token if provided
     if (deviceToken) {
@@ -218,8 +218,8 @@ async function logout(userId, accessToken, deviceToken = null) {
       }
     }
     
-    // Sign out from Supabase Auth
-    const { error } = await supabase.auth.signOut();
+    // Sign out from Postgres Auth
+    const { error } = await dbClient.auth.signOut();
 
     if (error) {
       throw new Error(error.message || 'Logout failed');
@@ -273,13 +273,13 @@ async function refreshToken(refreshToken) {
 }
 
 /**
- * Get current user from Supabase session
+ * Get current user from Postgres session
  * @returns {Object} User data
  */
 async function getCurrentUser() {
   try {
-    const supabase = getSupabase();
-    const { data: { user }, error } = await supabase.auth.getUser();
+    const dbClient = getDb();
+    const { data: { user }, error } = await dbClient.auth.getUser();
 
     if (error || !user) {
       throw new Error('User not found or session expired');
@@ -346,8 +346,8 @@ async function changePassword(userId, userEmail, currentPassword, newPassword, c
     }
 
     // Step 1: Verify current password by attempting to sign in
-    const supabase = getSupabase();
-    const { data: signInData, error: signInError } = await supabase.auth.signInWithPassword({
+    const dbClient = getDb();
+    const { data: signInData, error: signInError } = await dbClient.auth.signInWithPassword({
       email: userEmail,
       password: currentPassword
     });
@@ -360,9 +360,9 @@ async function changePassword(userId, userEmail, currentPassword, newPassword, c
       };
     }
 
-    // Step 2: Update password using Supabase Admin API
-    const supabaseAdmin = getSupabaseAdmin();
-    const { data: updateData, error: updateError } = await supabaseAdmin.auth.admin.updateUserById(
+    // Step 2: Update password using Postgres Admin API
+    const dbAdmin = getDbAdmin();
+    const { data: updateData, error: updateError } = await dbAdmin.auth.admin.updateUserById(
       userId,
       { password: newPassword }
     );

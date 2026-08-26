@@ -1,13 +1,13 @@
 /**
  * Saved & shared dashboards (ported from the web app's /api/ai/dashboards
- * routes). Backed by the shared Supabase tables `ai_dashboards` and
+ * routes). Backed by the shared Postgres tables `ai_dashboards` and
  * `ai_dashboard_shares`. All ownership is keyed by the JWT user id.
  */
 
-import { supabaseServer } from './_supabase.mjs';
+import { dbServer } from './_dataClient.mjs';
 
 export async function listDashboards(userId) {
-  const ownedRes = await supabaseServer
+  const ownedRes = await dbServer
     .from('ai_dashboards')
     .select('id, title, thread_id, is_public, share_token, updated_at, created_at')
     .eq('user_id', userId)
@@ -15,7 +15,7 @@ export async function listDashboards(userId) {
     .limit(200);
   if (ownedRes.error) throw new Error(ownedRes.error.message);
 
-  const sharesRes = await supabaseServer
+  const sharesRes = await dbServer
     .from('ai_dashboard_shares')
     .select('dashboard_id, ai_dashboards!inner(id, title, user_id, thread_id, updated_at, created_at)')
     .eq('shared_with_user_id', userId);
@@ -29,7 +29,7 @@ export async function saveDashboard(userId, body) {
   if (!body || !body.title || !Array.isArray(body.widgets)) {
     throw new Error('title and widgets required');
   }
-  const { data, error } = await supabaseServer
+  const { data, error } = await dbServer
     .from('ai_dashboards')
     .insert({
       user_id: userId,
@@ -45,7 +45,7 @@ export async function saveDashboard(userId, body) {
 }
 
 async function dashboardReadable(userId, dashboardId) {
-  const { data: dash } = await supabaseServer
+  const { data: dash } = await dbServer
     .from('ai_dashboards')
     .select('id, user_id, is_public')
     .eq('id', dashboardId)
@@ -53,7 +53,7 @@ async function dashboardReadable(userId, dashboardId) {
   if (!dash) return false;
   if (dash.user_id === userId) return true;
   if (dash.is_public) return true;
-  const { data: share } = await supabaseServer
+  const { data: share } = await dbServer
     .from('ai_dashboard_shares')
     .select('id')
     .eq('dashboard_id', dashboardId)
@@ -64,7 +64,7 @@ async function dashboardReadable(userId, dashboardId) {
 
 export async function getDashboard(userId, id) {
   if (!(await dashboardReadable(userId, id))) return null;
-  const { data, error } = await supabaseServer
+  const { data, error } = await dbServer
     .from('ai_dashboards')
     .select('id, user_id, title, layout, widgets, thread_id, share_token, is_public, updated_at, created_at')
     .eq('id', id)
@@ -80,7 +80,7 @@ export async function updateDashboard(userId, id, body) {
   if (Array.isArray(body.widgets)) update.widgets = body.widgets;
   if (Object.keys(update).length === 0) throw new Error('no fields to update');
 
-  const { data, error } = await supabaseServer
+  const { data, error } = await dbServer
     .from('ai_dashboards')
     .update({ ...update, updated_at: new Date().toISOString() })
     .eq('id', id)
@@ -92,7 +92,7 @@ export async function updateDashboard(userId, id, body) {
 }
 
 export async function deleteDashboard(userId, id) {
-  const { error } = await supabaseServer
+  const { error } = await dbServer
     .from('ai_dashboards')
     .delete()
     .eq('id', id)

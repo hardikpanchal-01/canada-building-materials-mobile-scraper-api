@@ -9,7 +9,7 @@ require('dotenv').config();
 
 const crypto = require('crypto');
 const notificationService = require('../src/services/notificationService');
-const { getNotificationSupabase } = require('../src/config/notificationDatabase');
+const { getNotificationDb } = require('../src/config/notificationDatabase');
 
 const TARGET_USER_ID = '8dd1b8a3-a794-400d-961b-8a2fa28c2966';
 const TENANT_ID = 37;
@@ -56,9 +56,9 @@ async function run() {
 
   // 2. Insert into notification_queue for in-app history
   try {
-    const supabase = getNotificationSupabase();
+    const dbClient = getNotificationDb();
 
-    const { error } = await supabase
+    const { error } = await dbClient
       .from('notification_queue')
       .insert({
         queue_uuid: crypto.randomUUID(),

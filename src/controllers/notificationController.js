@@ -1,6 +1,6 @@
 const notificationService = require('../services/notificationService');
 const deviceService = require('../services/deviceService');
-const { getSupabase } = require('../config/database');
+const { getDb } = require('../config/database');
 
 /**
  * Batch check device tokens in database (fixes N+1 query issue)
@@ -13,8 +13,8 @@ async function batchCheckDeviceTokensInDatabase(deviceTokens) {
       return {};
     }
 
-    const supabase = getSupabase();
-    const { data, error } = await supabase
+    const dbClient = getDb();
+    const { data, error } = await dbClient
       .from('user_devices')
       .select('id, user_id, device_id, device_token, device_name, device_type, is_active')
       .in('device_token', deviceTokens)
@@ -45,8 +45,8 @@ async function batchCheckDeviceTokensInDatabase(deviceTokens) {
  */
 async function checkDeviceTokenInDatabase(deviceToken) {
   try {
-    const supabase = getSupabase();
-    const { data, error } = await supabase
+    const dbClient = getDb();
+    const { data, error } = await dbClient
       .from('user_devices')
       .select('id, user_id, device_id, device_token, device_name, device_type, is_active')
       .eq('device_token', deviceToken)

@@ -1,4 +1,4 @@
-const { getNotificationSupabase } = require('../config/notificationDatabase');
+const { getNotificationDb } = require('../config/notificationDatabase');
 const { getMessaging } = require('../config/Firebase');
 
 const FCM_BATCH_SIZE = 500;
@@ -144,12 +144,12 @@ async function sendPushNotificationToMultipleBatched(deviceTokens, title, body, 
 }
 
 /**
- * Get active device tokens for a user from notification Supabase
+ * Get active device tokens for a user from notification Postgres
  */
 async function getUserDeviceTokens(userId) {
-  const supabase = getNotificationSupabase();
+  const dbClient = getNotificationDb();
 
-  const { data, error } = await supabase
+  const { data, error } = await dbClient
     .from('user_devices')
     .select('device_token')
     .eq('user_id', userId)
@@ -161,12 +161,12 @@ async function getUserDeviceTokens(userId) {
 }
 
 /**
- * Check single device token in notification Supabase
+ * Check single device token in notification Postgres
  */
 async function checkDeviceToken(deviceToken) {
-  const supabase = getNotificationSupabase();
+  const dbClient = getNotificationDb();
 
-  const { data, error } = await supabase
+  const { data, error } = await dbClient
     .from('user_devices')
     .select('id, user_id, device_id, device_token, device_name, device_type, is_active')
     .eq('device_token', deviceToken)
@@ -182,14 +182,14 @@ async function checkDeviceToken(deviceToken) {
 }
 
 /**
- * Batch check device tokens in notification Supabase
+ * Batch check device tokens in notification Postgres
  */
 async function batchCheckDeviceTokens(deviceTokens) {
   if (!Array.isArray(deviceTokens) || deviceTokens.length === 0) return {};
 
-  const supabase = getNotificationSupabase();
+  const dbClient = getNotificationDb();
 
-  const { data, error } = await supabase
+  const { data, error } = await dbClient
     .from('user_devices')
     .select('id, user_id, device_id, device_token, device_name, device_type, is_active')
     .in('device_token', deviceTokens)
@@ -209,14 +209,14 @@ async function batchCheckDeviceTokens(deviceTokens) {
 }
 
 /**
- * Batch deactivate invalid tokens in notification Supabase
+ * Batch deactivate invalid tokens in notification Postgres
  */
 async function batchDeactivateTokens(deviceTokens) {
   if (!Array.isArray(deviceTokens) || deviceTokens.length === 0) return 0;
 
-  const supabase = getNotificationSupabase();
+  const dbClient = getNotificationDb();
 
-  const { data, error } = await supabase
+  const { data, error } = await dbClient
     .from('user_devices')
     .update({ is_active: false })
     .in('device_token', deviceTokens)

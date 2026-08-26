@@ -2,7 +2,7 @@
  * Truck Time Service
  *
  * Validates email sending windows based on truck schedules.
- * Integrates with the Supabase Edge Function to get first/last truck times.
+ * Integrates with the Postgres Edge Function to get first/last truck times.
  */
 
 // Configuration
@@ -50,18 +50,18 @@ function formatTimeInTimezone(date = new Date()) {
 }
 
 /**
- * Fetch daily truck times from Supabase Edge Function
+ * Fetch daily truck times from Postgres Edge Function
  * @param {string} date - Date in YYYY-MM-DD format
  * @returns {Promise<Object>} Truck times response
  */
 async function getDailyTruckTimes(date) {
   if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
-    console.error('Supabase configuration missing for truck times API');
+    console.error('Postgres configuration missing for truck times API');
     return {
       date,
       first_truck_time: null,
       last_truck_time: null,
-      error: 'Supabase configuration missing'
+      error: 'Postgres configuration missing'
     };
   }
 

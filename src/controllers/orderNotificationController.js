@@ -1,16 +1,16 @@
 const crypto = require('crypto');
 const notificationService = require('../services/notificationService');
 const notificationPushService = require('../services/notificationPushService');
-const { getNotificationSupabase } = require('../config/notificationDatabase');
+const { getNotificationDb } = require('../config/notificationDatabase');
 
 /**
  * Insert notification into notification_queue for in-app history
  */
 async function insertNotificationQueue({ userId, tenantId, eventCode, entityType, entityId, subject, body, orderCode, orderDate }) {
   try {
-    const supabase = getNotificationSupabase();
+    const dbClient = getNotificationDb();
 
-    const { error } = await supabase
+    const { error } = await dbClient
       .from('notification_queue')
       .insert({
         queue_uuid: crypto.randomUUID(),

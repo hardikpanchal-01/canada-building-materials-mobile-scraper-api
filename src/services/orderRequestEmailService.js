@@ -6,7 +6,7 @@
  */
 
 const nodemailer = require('nodemailer');
-const { getSupabaseAdmin } = require('../config/database');
+const { getDbAdmin } = require('../config/database');
 
 // --- SMTP Config ---
 function createTransporter() {
@@ -110,8 +110,8 @@ function getOrderUrl(orderId) {
 
 async function getEmailTemplateByKey(templateKey) {
   try {
-    const supabase = getSupabaseAdmin();
-    const { data, error } = await supabase
+    const dbClient = getDbAdmin();
+    const { data, error } = await dbClient
       .from('email_templates')
       .select('*')
       .eq('template_key', templateKey)

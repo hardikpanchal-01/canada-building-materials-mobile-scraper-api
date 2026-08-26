@@ -7,7 +7,7 @@
  * - Validate client credentials for code exchange
  */
 
-const { getAuthSupabaseAdmin } = require('../config/authDatabase');
+const { getAuthDbAdmin } = require('../config/authDatabase');
 const { decrypt, secureCompare } = require('../utils/encryptionUtils');
 
 // In-memory cache for tenant lookups by subdomain (10-minute TTL)
@@ -30,9 +30,9 @@ async function getTenantBySubdomain(subdomain) {
     return cached.data;
   }
 
-  const supabase = getAuthSupabaseAdmin();
+  const dbClient = getAuthDbAdmin();
 
-  const { data, error } = await supabase
+  const { data, error } = await dbClient
     .schema('auth_tenant')
     .from('tenants')
     .select('id, uuid, name, subdomain, redirect_url, client_id, status, settings')
@@ -73,9 +73,9 @@ async function getTenantBySubdomain(subdomain) {
  * @returns {Object|null} Full tenant data
  */
 async function getTenantById(tenantId) {
-  const supabase = getAuthSupabaseAdmin();
+  const dbClient = getAuthDbAdmin();
 
-  const { data, error } = await supabase
+  const { data, error } = await dbClient
     .schema('auth_tenant')
     .from('tenants')
     .select('*')
@@ -97,9 +97,9 @@ async function getTenantById(tenantId) {
  * @returns {Object|null} Tenant data with decrypted secrets
  */
 async function getTenantByClientId(clientId) {
-  const supabase = getAuthSupabaseAdmin();
+  const dbClient = getAuthDbAdmin();
 
-  const { data, error } = await supabase
+  const { data, error } = await dbClient
     .schema('auth_tenant')
     .from('tenants')
     .select('*')
@@ -202,15 +202,15 @@ async function validateClientCredentials(clientId, clientSecret) {
 }
 
 /**
- * Get tenant's Supabase credentials (decrypted)
- * Used to authenticate against tenant's Supabase instance
+ * Get tenant's Postgres credentials (decrypted)
+ * Used to authenticate against tenant's Postgres instance
  * @param {number} tenantId - Tenant ID
- * @returns {Object|null} Decrypted Supabase credentials
+ * @returns {Object|null} Decrypted Postgres credentials
  */
 async function getTenantSupabaseCredentials(tenantId) {
-  const supabase = getAuthSupabaseAdmin();
+  const dbClient = getAuthDbAdmin();
 
-  const { data, error } = await supabase
+  const { data, error } = await dbClient
     .schema('auth_tenant')
     .from('tenants')
     .select('supabase_url, supabase_anon_key, supabase_service_key')
@@ -236,7 +236,7 @@ async function getTenantSupabaseCredentials(tenantId) {
       supabase_service_key: tenant.supabase_service_key ? decrypt(tenant.supabase_service_key) : null
     };
   } catch (decryptError) {
-    console.error('Failed to decrypt tenant Supabase credentials:', decryptError.message);
+    console.error('Failed to decrypt tenant Postgres credentials:', decryptError.message);
     return null;
   }
 }

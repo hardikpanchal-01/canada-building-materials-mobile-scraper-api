@@ -27,7 +27,7 @@ function formatToUserTz(dateTimeStr, tz) {
  *       Fetches notifications from the notification queue for the authenticated user,
  *       filtered by tenant_id, ordered by created_at descending, with a default limit of 50.
  *
- *       Uses a **separate Supabase instance** dedicated to notifications.
+ *       Uses a **separate Postgres instance** dedicated to notifications.
  *     tags: [Notifications]
  *     security:
  *       - BearerAuth: []
