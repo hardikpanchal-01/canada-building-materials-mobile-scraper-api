@@ -26,18 +26,25 @@ function getCentralAuthPool() {
     return null;
   }
 
-  // CNPG uses a self-signed CA; the connection strings use sslmode=no-verify.
-  // Mirror the main pool: TLS on, hostname/CA verification off.
-  const needsSsl = /sslmode=(require|prefer|no-verify|verify)/.test(url) || /central|amazonaws|\.internal/.test(url);
+  // central-auth runs on CNPG with a SELF-SIGNED CA. Newer node-postgres treats a
+  // connection-string `sslmode` (require/prefer/verify-ca) as an alias for
+  // `verify-full`, which rejects the self-signed chain and overrides an `ssl`
+  // option. So STRIP sslmode from the string and make our explicit TLS-no-verify
+  // config authoritative (the estate's proven fix — see the remove-supabase
+  // runbook). TLS stays ON; only hostname/CA verification is disabled.
+  const connectionString = url
+    .replace(/([?&])sslmode=[^&]*/gi, '$1')
+    .replace(/[?&]$/, '')
+    .replace(/\?&/, '?');
 
   pool = new Pool({
-    connectionString: url,
+    connectionString,
     min: 1,
     max: 10,
     idleTimeoutMillis: 60000,
     connectionTimeoutMillis: 15000,
     statement_timeout: QUERY_TIMEOUT_MS,
-    ssl: needsSsl ? { rejectUnauthorized: false } : false,
+    ssl: { rejectUnauthorized: false },
   });
 
   pool.on('error', (err) => {

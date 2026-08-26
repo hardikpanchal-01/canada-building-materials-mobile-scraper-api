@@ -14,21 +14,19 @@
  */
 
 const { makeClient } = require('../db/client');
-const { getCentralAuthPool } = require('../db/centralAuthPool');
 
 const AUTH_REST_URL = process.env.AUTH_SUPABASE_URL;
 const AUTH_SERVICE_KEY = process.env.AUTH_SUPABASE_SERVICE_KEY;
 const AUTH_ANON_KEY = process.env.AUTH_SUPABASE_ANON_KEY;
 
+// Table access for auth_tenant goes through the auth GATEWAY over PostgREST
+// (dataBackend: 'rest'): the gateway holds the JWT-scoped role that has
+// auth_tenant grants, whereas a direct pool would need those grants granted on
+// the shared central-auth DB. This preserves the exact pre-migration behaviour
+// while using no `@supabase/*` SDK (thin fetch client, see db/restFetch.js).
 function getAuthDbAdmin() {
-  const pool = getCentralAuthPool();
-  if (!pool) {
-    console.error('[AuthDB] CENTRAL_AUTH_DATABASE_URL is not set — auth_tenant table access is unavailable.');
-    // Still return a client so .rpc (fetch to the auth gateway) works; table
-    // access will surface a clear error via `{ data, error }`.
-  }
   return makeClient({
-    pool,
+    dataBackend: 'rest',
     schema: 'auth_tenant',
     restUrl: AUTH_REST_URL,
     serviceKey: AUTH_SERVICE_KEY,

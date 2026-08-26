@@ -199,4 +199,139 @@ function makeStorage(cfg) {
   };
 }
 
-module.exports = { makeRpc, makeAuth, makeStorage };
+// ---------------------------------------------------------------------------
+// PostgREST executor — runs a query descriptor (the same shape queryBuilder.js
+// produces) against a PostgREST gateway over HTTP, returning { data, error,
+// count }. Used for the central-auth (auth_tenant) client, which reaches its
+// schema through the auth gateway's JWT-scoped role rather than a direct pool.
+// ---------------------------------------------------------------------------
+
+function enc(v) {
+  return encodeURIComponent(String(v));
+}
+
+// A single filter -> PostgREST query param `key=op.value` (or `or=(...)`).
+function filterParam(f) {
+  const neg = f.negate ? 'not.' : '';
+  switch (f.op) {
+    case 'eq': case 'neq': case 'gt': case 'gte': case 'lt': case 'lte':
+    case 'like': case 'ilike':
+      return `${enc(f.column)}=${neg}${f.op}.${enc(f.value)}`;
+    case 'in': {
+      const arr = Array.isArray(f.value) ? f.value : [f.value];
+      const list = arr.map((v) => `"${String(v).replace(/"/g, '\\"')}"`).join(',');
+      return `${enc(f.column)}=${neg}in.(${enc(list)})`;
+    }
+    case 'is':
+      return `${enc(f.column)}=${neg}is.${f.value === null ? 'null' : f.value}`;
+    case 'contains':
+      return `${enc(f.column)}=${neg}cs.${enc(JSON.stringify(f.value))}`;
+    case 'overlaps': {
+      const arr = Array.isArray(f.value) ? f.value : [f.value];
+      return `${enc(f.column)}=${neg}ov.{${arr.map(enc).join(',')}}`;
+    }
+    case 'or':
+      return `or=(${enc(String(f.value))})`;
+    default:
+      return '';
+  }
+}
+
+function buildQueryString(d) {
+  const parts = [];
+  if (d.op === 'select') {
+    const cols = (d.columns || '*').replace(/\s+/g, '');
+    parts.push(`select=${enc(cols)}`);
+  } else if (d.returning) {
+    parts.push('select=*');
+  }
+  for (const f of d.filters) {
+    const p = filterParam(f);
+    if (p) parts.push(p);
+  }
+  for (const o of d.orders) {
+    parts.push(`order=${enc(o.column)}.${o.ascending ? 'asc' : 'desc'}${o.nullsFirst ? '.nullsfirst' : '.nullslast'}`);
+  }
+  if (d.rangeFrom != null && d.rangeTo != null) {
+    parts.push(`offset=${Math.max(0, d.rangeFrom)}`);
+    parts.push(`limit=${Math.max(0, d.rangeTo - d.rangeFrom + 1)}`);
+  } else if (d.limit != null) {
+    parts.push(`limit=${Math.max(0, d.limit)}`);
+  }
+  if (d.op === 'upsert' && d.onConflict) {
+    parts.push(`on_conflict=${enc(d.onConflict)}`);
+  }
+  return parts.join('&');
+}
+
+async function executeRest(d, cfg) {
+  if (!cfg || !cfg.url) return { data: null, error: { message: 'REST url not configured' } };
+  const key = cfg.serviceKey || cfg.anonKey || '';
+  const headers = {
+    apikey: key,
+    Authorization: `Bearer ${key}`,
+  };
+  if (d.schema && d.schema !== 'public') {
+    headers['Accept-Profile'] = d.schema;
+    headers['Content-Profile'] = d.schema;
+  }
+
+  const wantsRows = d.op === 'select' || d.returning;
+  const preferBits = [];
+  if (d.op === 'upsert') preferBits.push('resolution=merge-duplicates');
+  if (d.op === 'upsert' && d.ignoreDuplicates) preferBits[preferBits.length - 1] = 'resolution=ignore-duplicates';
+  if (wantsRows && d.op !== 'select') preferBits.push('return=representation');
+  if (d.count === 'exact' || d.head) preferBits.push('count=exact');
+  if (preferBits.length) headers.Prefer = preferBits.join(',');
+
+  if (d.single === 'single' || d.single === 'maybe') {
+    headers.Accept = 'application/vnd.pgrst.object+json';
+  }
+
+  let method = 'GET';
+  let body;
+  if (d.op === 'insert' || d.op === 'upsert') { method = 'POST'; body = JSON.stringify(d.values ?? {}); headers['Content-Type'] = 'application/json'; }
+  else if (d.op === 'update') { method = 'PATCH'; body = JSON.stringify(d.values ?? {}); headers['Content-Type'] = 'application/json'; }
+  else if (d.op === 'delete') { method = 'DELETE'; }
+
+  const qs = buildQueryString(d);
+  const url = `${cfg.url}/rest/v1/${d.table}${qs ? `?${qs}` : ''}`;
+
+  try {
+    const res = await fetch(url, { method, headers, body });
+    // count from Content-Range: "0-9/42"
+    let count = null;
+    const cr = res.headers.get('content-range');
+    if (cr && cr.includes('/')) {
+      const total = cr.split('/')[1];
+      if (total && total !== '*') count = parseInt(total, 10);
+    }
+    const ct = res.headers.get('content-type') || '';
+    let payload = null;
+    if (ct.includes('application/json')) payload = await res.json().catch(() => null);
+    else { const t = await res.text().catch(() => ''); payload = t || null; }
+
+    if (!res.ok) {
+      // maybeSingle: PostgREST returns 406 when 0 rows for object accept
+      if (d.single === 'maybe' && (res.status === 406 || res.status === 404)) {
+        return { data: null, error: null, count };
+      }
+      const message = (payload && (payload.message || payload.error || payload.msg)) ||
+        (typeof payload === 'string' ? payload : `Request failed with status ${res.status}`);
+      return { data: null, error: { message, code: payload && payload.code, status: res.status }, count };
+    }
+
+    if (d.head) return { data: null, error: null, count };
+    if (d.single === 'single') {
+      return { data: payload ?? null, error: payload ? null : { message: 'No rows', code: 'PGRST116' }, count };
+    }
+    if (d.single === 'maybe') {
+      return { data: payload ?? null, error: null, count };
+    }
+    return { data: payload ?? [], error: null, count };
+  } catch (e) {
+    return { data: null, error: { message: e.message } };
+  }
+}
+
+module.exports = { makeRpc, makeAuth, makeStorage, executeRest };

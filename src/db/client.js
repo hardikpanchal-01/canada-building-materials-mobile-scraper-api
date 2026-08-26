@@ -18,7 +18,7 @@
 
 const { QueryBuilder } = require('./queryBuilder');
 const { executeQuery } = require('./executeQuery');
-const { makeRpc, makeAuth, makeStorage } = require('./restFetch');
+const { makeRpc, makeAuth, makeStorage, executeRest } = require('./restFetch');
 
 /**
  * @param {object} cfg
@@ -31,9 +31,17 @@ const { makeRpc, makeAuth, makeStorage } = require('./restFetch');
 function makeClient(cfg = {}) {
   const pool = cfg.pool || null;
   const defaultSchema = cfg.schema || 'public';
-  const exec = (d) => executeQuery(d, pool);
 
   const restBase = { url: cfg.restUrl, serviceKey: cfg.serviceKey, anonKey: cfg.anonKey };
+
+  // Table access backend for `.from()`: direct Postgres (default) or the
+  // PostgREST gateway over HTTP. The central-auth (auth_tenant) client uses
+  // 'rest' because it reaches its schema through the auth gateway's JWT-scoped
+  // role rather than a direct pool.
+  const useRest = cfg.dataBackend === 'rest' || !pool;
+  const exec = useRest
+    ? (d) => executeRest(d, restBase)
+    : (d) => executeQuery(d, pool);
 
   const client = {
     from(table) {
