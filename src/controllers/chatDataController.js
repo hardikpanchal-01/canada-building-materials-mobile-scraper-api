@@ -2,6 +2,7 @@
  * Chat data endpoints — rooms, messages, send.
  * Queries PostgreSQL directly.
  */
+const getPresignedUrl = async (url) => url;
 const { executeDirectSQL } = require('../utils/postgresExecutor');
 const { uploadChatFile } = require('../services/database/s3Storage');
 
@@ -53,19 +54,28 @@ async function getMessages(req, res) {
     const limit = parseInt(req.query.limit) || 50;
     const before = req.query.before;
 
-    let query = `SELECT * FROM chat_messages WHERE order_id = $1 AND (is_deleted = false OR is_deleted IS NULL)`;
+    let query = `SELECT cm.*, u.avatar_url AS sender_avatar_url
+      FROM chat_messages cm
+      LEFT JOIN users u ON u.id = cm.sender_id
+      WHERE cm.order_id = $1 AND (cm.is_deleted = false OR cm.is_deleted IS NULL)`;
     const params = [order_id];
 
     if (before) {
-      query += ` AND created_at < $${params.length + 1}`;
+      query += ` AND cm.created_at < $${params.length + 1}`;
       params.push(before);
     }
 
-    query += ` ORDER BY created_at DESC LIMIT $${params.length + 1}`;
+    query += ` ORDER BY cm.created_at DESC LIMIT $${params.length + 1}`;
     params.push(limit);
 
     const result = await executeDirectSQL(query, params);
-    return res.json({ success: true, data: result.data || [] });
+    const messages = result.data || [];
+    await Promise.all(messages.map(async (msg) => {
+      if (msg.sender_avatar_url) {
+        msg.sender_avatar_url = await getPresignedUrl(msg.sender_avatar_url);
+      }
+    }));
+    return res.json({ success: true, data: messages });
   } catch (error) {
     return res.status(500).json({ success: false, message: error.message });
   }
