@@ -782,13 +782,7 @@ async function getTicketsByOrderId(req, res) {
       });
     }
 
-    const orderId = parseInt(order_id, 10);
-    if (isNaN(orderId)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Order ID must be a valid number'
-      });
-    }
+    const orderId = String(order_id).trim();
 
     const tz = req.user?.timezone || null;
     const result = await ticketService.getTicketsByOrderId(orderId, {
