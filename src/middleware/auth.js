@@ -575,7 +575,7 @@ async function authenticate(req, res, next) {
     // Attach user data with access control info - matching web app structure
     req.user = {
       id: decoded.id,
-      effectiveUserId: accessData.effectiveUserId || decoded.id,  // Mapped ID for FK-compatible queries
+      effectiveUserId: accessData.effectiveUserId || decoded.id,
       email: decoded.email || '',
       phone: decoded.phone || '',
       role: decoded.role || 'authenticated',

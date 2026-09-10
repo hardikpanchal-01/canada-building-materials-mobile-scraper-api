@@ -138,7 +138,7 @@ async function sendOrderNotification(req, res) {
     console.log('===================================================');
 
     // Defaults from Bearer token; body values override
-    const targetUserId = user_id || req.user?.id;
+    const targetUserId = user_id || req.user?.effectiveUserId || req.user?.id;
     const effectiveTenantId = tenant_id ?? req.user?.metadata?.tenant?.tenant_id ?? null;
 
     if (!targetUserId) {
