@@ -65,26 +65,29 @@ async function getAllWeatherData(req, res) {
   try {
     const { order_code, order_date } = req.query;
 
-    if (!order_code) {
-      return res.status(400).json({
-        success: false,
-        message: 'Order code is required'
+    // If order_code and order_date provided, return per-order weather
+    if (order_code && order_date) {
+      const allData = await weatherService.getAllWeatherData(order_code, order_date);
+      return res.status(200).json({
+        success: true,
+        message: 'Weather data retrieved successfully',
+        data: allData
       });
     }
 
-    if (!order_date) {
-      return res.status(400).json({
-        success: false,
-        message: 'Order date is required'
-      });
-    }
-    
-    const allData = await weatherService.getAllWeatherData(order_code, order_date);
+    // Otherwise return all plant weather data
+    const { executeDirectSQL } = require('../utils/postgresExecutor');
+    const result = await executeDirectSQL(
+      `SELECT pw.*, p.code as plant_code, p.description as plant_name
+       FROM plant_weather pw
+       JOIN plants p ON p.id = pw.plant_id
+       ORDER BY pw.fetched_at DESC`
+    );
 
     return res.status(200).json({
       success: true,
-      message: 'Weather data retrieved successfully',
-      data: allData
+      message: 'Plant weather data retrieved successfully',
+      data: result.data || []
     });
   } catch (error) {
     console.error('Error getting weather data:', error);

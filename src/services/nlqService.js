@@ -403,7 +403,7 @@ async function processQuery(prompt, sessionId) {
   try {
     // STEP 1: Generate SQL from natural language
     const sqlResponse = await client.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: 'claude-sonnet-4-6',
       max_tokens: 4096,
       system: SQL_GENERATION_PROMPT,
       messages: session.messages
@@ -527,7 +527,7 @@ Please present these results in a clear, human-friendly format.`;
 
   try {
     const response = await client.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: 'claude-sonnet-4-6',
       max_tokens: 4096,
       system: RESPONSE_FORMATTING_PROMPT,
       messages: [{ role: 'user', content: formattingPrompt }]

@@ -11,7 +11,7 @@ const { loadUserAccessData } = require('../middleware/auth');
  */
 async function getAuthUserBy(column, value) {
   const result = await executeDirectSQL(
-    `SELECT id, email, phone, role, encrypted_password, raw_user_meta_data, banned_until, deleted_at, created_at
+    `SELECT id, email, phone, role, encrypted_password, raw_user_meta_data, deleted_at, created_at
      FROM auth.users
      WHERE ${column} = $1 AND deleted_at IS NULL
      LIMIT 1`,
@@ -93,10 +93,6 @@ async function loginWithEmail(email, password, deviceInfo = null) {
       throw new Error('Invalid email or password');
     }
 
-    if (authUser.banned_until && new Date(authUser.banned_until) > new Date()) {
-      throw new Error('Invalid email or password');
-    }
-
     const passwordValid = await verifyPassword(password, authUser.encrypted_password);
     if (!passwordValid) {
       throw new Error('Invalid email or password');
@@ -171,10 +167,6 @@ async function loginWithPhone(phone, password, deviceInfo = null) {
       if (profileResult.data.length > 0 && !profileResult.data[0].active) {
         throw new Error('Your account is pending admin approval. You will be notified via email or phone once approved.');
       }
-    }
-
-    if (authUser.banned_until && new Date(authUser.banned_until) > new Date()) {
-      throw new Error('Invalid phone number or password');
     }
 
     const passwordValid = await verifyPassword(password, authUser.encrypted_password);
