@@ -331,8 +331,9 @@ async function getAllowedProjectCodesForUser(userId) {
   }
 }
 
-// Cache for central auth UUID → public.users UUID mapping (avoids repeated lookups)
+// Cache for central auth UUID → public.users UUID mapping (30-minute TTL)
 const _userIdMappingCache = new Map();
+const USER_ID_MAPPING_CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
 
 /**
  * Resolve the effective user ID for role/access queries.
@@ -340,16 +341,16 @@ const _userIdMappingCache = new Map();
  * user_roles and user_customers reference public.users.id, so we need the old UUID for those queries.
  */
 async function resolveEffectiveUserId(userId, userEmail) {
-  // Check mapping cache first
+  // Check mapping cache first (with TTL)
   const cached = _userIdMappingCache.get(userId);
-  if (cached) return cached;
+  if (cached && (Date.now() - cached.ts) < USER_ID_MAPPING_CACHE_TTL_MS) return cached.value;
 
   // Quick check: does this userId exist in user_roles? If yes, no mapping needed.
   try {
     const checkSql = `SELECT 1 FROM user_roles WHERE user_id = $1 LIMIT 1`;
     const checkResult = await executeDirectSQL(checkSql, [userId]);
     if (checkResult.data && checkResult.data.length > 0) {
-      _userIdMappingCache.set(userId, userId);
+      _userIdMappingCache.set(userId, { value: userId, ts: Date.now() });
       return userId;
     }
   } catch (e) {
@@ -361,7 +362,7 @@ async function resolveEffectiveUserId(userId, userEmail) {
     const checkSql = `SELECT 1 FROM user_customers WHERE user_id = $1 LIMIT 1`;
     const checkResult = await executeDirectSQL(checkSql, [userId]);
     if (checkResult.data && checkResult.data.length > 0) {
-      _userIdMappingCache.set(userId, userId);
+      _userIdMappingCache.set(userId, { value: userId, ts: Date.now() });
       return userId;
     }
   } catch (e) {
@@ -377,7 +378,7 @@ async function resolveEffectiveUserId(userId, userEmail) {
         const oldId = result.data[0].id;
         if (oldId !== userId) {
           console.log(`[AccessControl] Resolved user ID: ${userId} → ${oldId} (via email ${userEmail})`);
-          _userIdMappingCache.set(userId, oldId);
+          _userIdMappingCache.set(userId, { value: oldId, ts: Date.now() });
           return oldId;
         }
       }
@@ -387,7 +388,7 @@ async function resolveEffectiveUserId(userId, userEmail) {
   }
 
   // No mapping found — use the original userId
-  _userIdMappingCache.set(userId, userId);
+  _userIdMappingCache.set(userId, { value: userId, ts: Date.now() });
   return userId;
 }
 
