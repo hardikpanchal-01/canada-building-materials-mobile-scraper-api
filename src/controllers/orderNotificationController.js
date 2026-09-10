@@ -5,6 +5,7 @@ const { executeDirectSQL } = require('../utils/postgresExecutor');
 
 /**
  * Insert notification into notification_queue for in-app history
+ * (base table lives in the notification schema; public.notification_queue is a view)
  */
 async function insertNotificationQueue({ userId, tenantId, eventCode, entityType, entityId, subject, body, orderCode, orderDate }) {
   try {

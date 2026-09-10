@@ -3,28 +3,18 @@ const router = express.Router();
 const { authenticate, invalidateTzPrefCache } = require('../middleware/auth');
 const { executeDirectSQL } = require('../utils/postgresExecutor');
 
-/**
- * @route   GET /api/user-preferences
- * @desc    Get all user preferences
- * @access  Private
- */
-router.get('/', authenticate, async (req, res) => {
+// Resolve central-auth UUID to the UUID that exists in users/auth.users (FK target)
+async function resolveDbUserId(jwtUserId, email) {
   try {
-    const userId = req.user.id;
     const result = await executeDirectSQL(
-      'SELECT preference_key, preference_value FROM user_preferences WHERE user_id = $1',
-      [userId]
+      `SELECT COALESCE(
+        (SELECT id FROM users WHERE id = $1::uuid),
+        (SELECT id FROM users WHERE LOWER(email) = LOWER($2) LIMIT 1)
+      ) as resolved_id`, [jwtUserId, email || '']
     );
-    const prefs = {};
-    for (const row of (result.data || [])) {
-      prefs[row.preference_key] = row.preference_value;
-    }
-    return res.status(200).json({ success: true, data: prefs });
-  } catch (err) {
-    console.error('[UserPreferences] GET all error:', err.message);
-    return res.status(500).json({ success: false, message: 'Failed to fetch preferences' });
-  }
-});
+    return result.data?.[0]?.resolved_id || jwtUserId;
+  } catch { return jwtUserId; }
+}
 
 /**
  * @route   GET /api/user-preferences/:key
@@ -33,11 +23,7 @@ router.get('/', authenticate, async (req, res) => {
  */
 router.get('/:key', authenticate, async (req, res) => {
   try {
-    // Use req.user.id (the JWT's id) so the saved preference is keyed by the SAME
-    // id the auth middleware reads it back by (middleware/auth.js: .eq('user_id', decoded.id)).
-    // Using a resolved/email-mapped id here caused timezone changes to never reflect
-    // for multi-tenant users (saved under one id, read under another).
-    const userId = req.user.id;
+    const userId = await resolveDbUserId(req.user.id, req.user.email);
     const { key } = req.params;
 
     let data;
@@ -69,11 +55,7 @@ router.get('/:key', authenticate, async (req, res) => {
  */
 router.put('/:key', authenticate, async (req, res) => {
   try {
-    // Use req.user.id (the JWT's id) so the saved preference is keyed by the SAME
-    // id the auth middleware reads it back by (middleware/auth.js: .eq('user_id', decoded.id)).
-    // Using a resolved/email-mapped id here caused timezone changes to never reflect
-    // for multi-tenant users (saved under one id, read under another).
-    const userId = req.user.id;
+    const userId = await resolveDbUserId(req.user.id, req.user.email);
     const { key } = req.params;
     const { value } = req.body;
 

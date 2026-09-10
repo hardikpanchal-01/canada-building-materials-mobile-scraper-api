@@ -23,7 +23,7 @@ async function checkOrderAccess(orderCode, orderDate, userAccess) {
       SELECT 1 FROM order_products op_ac
       INNER JOIN order_product_schedules ops_ac ON ops_ac.order_product_id = op_ac.id
       WHERE op_ac.order_id = o.order_id
-        AND (op_ac.order_qty_unit = 'YDQ' AND op_ac.is_mix = true)
+        AND (UPPER(op_ac.order_qty_unit) = 'CY' AND op_ac.is_mix = true)
         AND ops_ac.plant_code::text IN (${placeholders})
     )`);
     params.push(...userAccess.allowedPlants.map(p => String(p)));
@@ -462,7 +462,7 @@ async function getOrders(req, res) {
     // Add is_favourite flag to each order
     result.orders = result.orders.map(order => ({
       ...order,
-      is_favourite: favouriteIds.has(order.order_id)
+      is_favourite: favouriteIds.has(Number(order.order_id))
     }));
 
     // Hide region_name from filters if tenant has show_regions disabled
@@ -860,7 +860,7 @@ async function getOrderById(req, res) {
     }
 
     // Add is_favourite flag to order
-    order.is_favourite = favouriteIds.has(order.order_id);
+    order.is_favourite = favouriteIds.has(Number(order.order_id));
 
     return res.status(200).json({
       success: true,

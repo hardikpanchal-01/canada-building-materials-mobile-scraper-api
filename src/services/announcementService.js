@@ -1,5 +1,14 @@
 const { executeDirectSQL } = require('../utils/postgresExecutor');
 
+// TODO(schema-mismatch): the live Dolese tenant DB's `announcements` table has columns
+// (id uuid, name, campaign_id, start_date date, end_date date, tile_type, tagline, title,
+// subtitle, icon_or_percent, color, is_published, message_details, ...) and junction tables
+// announcement_screens (plant_code) / announcement_organizations (zone_name).
+// It has NO `published` boolean and NO `plant_ids` integer-array column that this service
+// (and its controller/swagger contract) rely on. The queries below are faithful translations
+// of the original calls and will fail against the live Dolese schema in exactly
+// the same way the original code would have (undefined column errors).
+
 /**
  * Get plant_ids for a user based on their roles
  * Flow: user_id → user_roles → role_plants → plant_ids
@@ -11,7 +20,7 @@ async function getUserPlantIds(userId) {
   let userRoles;
   try {
     const result = await executeDirectSQL(
-      'SELECT role_id FROM user_roles WHERE user_id = $1',
+      'SELECT role_id::int AS role_id FROM user_roles WHERE user_id = $1',
       [userId]
     );
     userRoles = result.data;
@@ -29,7 +38,7 @@ async function getUserPlantIds(userId) {
   let rolePlants;
   try {
     const result = await executeDirectSQL(
-      'SELECT plant_id FROM role_plants WHERE role_id = ANY($1)',
+      'SELECT plant_id::int AS plant_id FROM role_plants WHERE role_id = ANY($1)',
       [roleIds]
     );
     rolePlants = result.data;

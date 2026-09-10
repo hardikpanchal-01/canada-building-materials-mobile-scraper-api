@@ -1,5 +1,6 @@
 const { executeDirectSQL } = require('../utils/postgresExecutor');
-const { uploadAvatarToStorage, deleteAvatarFromStorage, AVATARS_BUCKET } = require('./database/storageClient');
+const { executeAuthSQL } = require('../config/authPostgres');
+const { uploadAvatarToStorage, deleteAvatarFromStorage, AVATARS_BUCKET } = require('./database/s3Storage');
 
 // In-memory user profile cache (2-minute TTL)
 // getUserProfile is called on every authenticated request via dashboard/controllers
@@ -21,13 +22,13 @@ function _invalidateProfileCache(userId) {
 }
 
 /**
- * Get user email from auth.users via Postgres Auth (fallback if not in JWT)
+ * Get user email from auth.users via auth.users (fallback if not in JWT)
  * @param {string} userId - User ID (UUID)
  * @returns {string|null} User email
  */
 async function getUserEmailFromAuth(userId) {
   try {
-    // Try direct SQL lookup in auth.users
+    // 1. Look up the email in tenant's auth.users
     try {
       const result = await executeDirectSQL(
         'SELECT email FROM auth.users WHERE id = $1 AND deleted_at IS NULL LIMIT 1',
@@ -37,11 +38,22 @@ async function getUserEmailFromAuth(userId) {
         return result.data[0].email;
       }
     } catch (adminError) {
-      // auth.users lookup not available, continue to fallback
       console.warn('auth.users lookup not available:', adminError.message);
     }
 
-    // Fallback: The email should come from JWT token in most cases
+    // 2. Look up in central auth DB (public.users) — the UUID may only exist there
+    try {
+      const result = await executeAuthSQL(
+        'SELECT email FROM public.users WHERE uuid = $1 AND deleted_at IS NULL LIMIT 1',
+        [userId]
+      );
+      if (result.data.length > 0 && result.data[0].email) {
+        return result.data[0].email;
+      }
+    } catch (centralError) {
+      console.warn('Central auth lookup not available:', centralError.message);
+    }
+
     return null;
   } catch (error) {
     console.warn('Could not fetch user email from auth:', error.message);
@@ -62,7 +74,7 @@ async function createUserProfile(userId, email) {
       'SELECT * FROM users WHERE id = $1 LIMIT 1',
       [userId]
     );
-    const existingUser = existingResult.data?.[0] || null;
+    const existingUser = existingResult.data[0] || null;
 
     // If user already exists, return it
     if (existingUser) {
@@ -111,7 +123,7 @@ async function createUserProfile(userId, email) {
           'SELECT * FROM users WHERE id = $1 LIMIT 1',
           [userId]
         );
-        const existingById = existingByIdResult.data?.[0] || null;
+        const existingById = existingByIdResult.data[0] || null;
 
         if (existingById) {
           return existingById;
@@ -122,7 +134,7 @@ async function createUserProfile(userId, email) {
             'SELECT * FROM users WHERE email = $1 LIMIT 1',
             [email]
           );
-          const existingByEmail = existingByEmailResult.data?.[0] || null;
+          const existingByEmail = existingByEmailResult.data[0] || null;
 
           if (existingByEmail) {
             return existingByEmail;
@@ -151,7 +163,7 @@ async function getUserCompany(userId) {
        LIMIT 1`,
       [userId]
     );
-    const data = result.data?.[0] || null;
+    const data = result.data[0] || null;
 
     if (!data) {
       return null;
@@ -184,7 +196,7 @@ async function getUserProfile(userId, userEmail = null) {
         'SELECT * FROM users WHERE id = $1 LIMIT 1',
         [userId]
       );
-      data = result.data?.[0] || null;
+      data = result.data[0] || null;
     } catch (error) {
       throw new Error(error.message || 'Failed to fetch user profile');
     }
@@ -203,10 +215,10 @@ async function getUserProfile(userId, userEmail = null) {
           'SELECT * FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1',
           [email]
         );
-        const existingByEmail = existingByEmailResult.data?.[0] || null;
+        const existingByEmail = existingByEmailResult.data[0] || null;
 
         if (existingByEmail) {
-          // User exists with a different ID (old Postgres auth vs new central auth)
+          // User exists with a different ID (old auth vs new central auth)
           // Return existing profile as-is — cannot update users.id due to FK constraints from user_roles/user_customers
           console.log(`User found by email ${email} with old ID ${existingByEmail.id} (new auth ID: ${userId})`);
           const company = await getUserCompany(existingByEmail.id);
@@ -310,9 +322,7 @@ function formatUserProfile(data, company = null) {
     active: data.active || false,
     createdAt: data.created_at,
     updatedAt: data.updated_at,
-    avatarUrl: data.avatar_url || null,
-    // Tenant volume unit (m³ for CBM, CY for US). Shared mobile app renders this.
-    volumeUnit: process.env.VOLUME_UNIT || 'CY'
+    avatarUrl: data.avatar_url || null
   };
 }
 
@@ -349,7 +359,7 @@ async function updateUserProfile(userId, profileData, userEmail = null) {
     if (profileData.firstName !== undefined || profileData.lastName !== undefined) {
       const firstName = profileData.firstName !== undefined ? profileData.firstName : currentProfile.firstName;
       const lastName = profileData.lastName !== undefined ? profileData.lastName : currentProfile.lastName;
-
+      
       if (firstName || lastName) {
         updateData.full_name = `${firstName || ''} ${lastName || ''}`.trim();
       } else {
@@ -417,17 +427,21 @@ async function updateUserProfile(userId, profileData, userEmail = null) {
         values.push(value);
       }
       // Resolve the actual local user ID (central auth UUID may differ)
-      // Use the RESOLVED public.users id (currentProfile.id), not the raw central-auth
-      // userId. Users created via central auth carry a different public.users id and are
-      // matched by email in getUserProfile(); updating by the central userId matches 0 rows.
-      const targetUserId = currentProfile?.id || userId;
-      values.push(targetUserId);
+      let localId = userId;
+      if (currentProfile?.email) {
+        const idLookup = await executeDirectSQL(
+          'SELECT id FROM users WHERE email = $1 LIMIT 1',
+          [currentProfile.email]
+        );
+        if (idLookup.data.length > 0) localId = idLookup.data[0].id;
+      }
+      values.push(localId);
 
       const result = await executeDirectSQL(
         `UPDATE users SET ${setClauses.join(', ')} WHERE id = $${paramIndex} RETURNING *`,
         values
       );
-      data = result.data?.[0] || null;
+      data = result.data[0] || null;
     } catch (error) {
       console.error('PostgreSQL update error:', error);
       throw new Error(error.message || 'Failed to update user profile');
@@ -458,7 +472,7 @@ async function userExists(userId) {
       [userId]
     );
 
-    return !!result.data?.[0];
+    return !!result.data[0];
   } catch (error) {
     return false;
   }
@@ -472,36 +486,26 @@ async function userExists(userId) {
  * @param {string} originalName - Original filename
  * @returns {Object} Updated user profile
  */
-/**
- * Resolve the actual public.users row id for an authenticated user. Users created
- * via central auth carry a different public.users id (matched by email), so callers
- * must not assume req.user.id === public.users.id. Falls back to userId.
- */
-async function resolveUserRowId(userId, userEmail = null) {
-  const byIdResult = await executeDirectSQL(
-    'SELECT id FROM users WHERE id = $1 LIMIT 1',
-    [userId]
-  );
-  if (byIdResult.data?.[0]) return byIdResult.data[0].id;
-  if (userEmail) {
-    const byEmailResult = await executeDirectSQL(
-      'SELECT id FROM users WHERE email = $1 LIMIT 1',
-      [userEmail]
-    );
-    if (byEmailResult.data?.[0]) return byEmailResult.data[0].id;
+async function uploadUserAvatar(userId, fileBuffer, mimeType, originalName, userEmail) {
+  // Resolve the effective user ID — JWT auth UUID may differ from tenant-local UUID
+  let effectiveUserId = userId;
+  const idCheck = await executeDirectSQL('SELECT id FROM users WHERE id = $1 LIMIT 1', [userId]);
+  if (!idCheck.data || idCheck.data.length === 0) {
+    const email = userEmail || await getUserEmailFromAuth(userId);
+    if (email) {
+      const byEmail = await executeDirectSQL('SELECT id FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1', [email]);
+      if (byEmail.data?.[0]?.id) {
+        effectiveUserId = byEmail.data[0].id;
+      }
+    }
   }
-  return userId;
-}
-
-async function uploadUserAvatar(userId, fileBuffer, mimeType, originalName, userEmail = null) {
-  const rowId = await resolveUserRowId(userId, userEmail);
 
   // Get current avatar URL to clean up old file
   const currentUserResult = await executeDirectSQL(
     'SELECT avatar_url FROM users WHERE id = $1 LIMIT 1',
-    [rowId]
+    [effectiveUserId]
   );
-  const currentUser = currentUserResult.data?.[0] || null;
+  const currentUser = currentUserResult.data[0] || null;
 
   // Delete old avatar from storage if it exists in our bucket
   if (currentUser && currentUser.avatar_url && currentUser.avatar_url.includes(AVATARS_BUCKET)) {
@@ -516,17 +520,17 @@ async function uploadUserAvatar(userId, fileBuffer, mimeType, originalName, user
     }
   }
 
-  // Upload new avatar
-  const { publicUrl } = await uploadAvatarToStorage(rowId, fileBuffer, mimeType, originalName);
+  // Upload new avatar to S3
+  const { publicUrl } = await uploadAvatarToStorage(effectiveUserId, fileBuffer, mimeType, originalName);
 
   // Update avatar_url in the users table
   let data;
   try {
     const result = await executeDirectSQL(
       'UPDATE users SET avatar_url = $1, updated_at = $2 WHERE id = $3 RETURNING *',
-      [publicUrl, new Date().toISOString(), rowId]
+      [publicUrl, new Date().toISOString(), effectiveUserId]
     );
-    data = result.data?.[0] || null;
+    data = result.data[0] || null;
   } catch (error) {
     throw new Error(error.message || 'Failed to update avatar URL');
   }
@@ -536,7 +540,8 @@ async function uploadUserAvatar(userId, fileBuffer, mimeType, originalName, user
   }
 
   _invalidateProfileCache(userId);
-  const company = await getUserCompany(rowId);
+  _invalidateProfileCache(effectiveUserId);
+  const company = await getUserCompany(userId);
   return formatUserProfile(data, company);
 }
 
@@ -545,15 +550,13 @@ async function uploadUserAvatar(userId, fileBuffer, mimeType, originalName, user
  * @param {string} userId - User ID (UUID)
  * @returns {Object} Updated user profile
  */
-async function removeUserAvatar(userId, userEmail = null) {
-  const rowId = await resolveUserRowId(userId, userEmail);
-
+async function removeUserAvatar(userId) {
   // Get current avatar URL
   const currentUserResult = await executeDirectSQL(
     'SELECT avatar_url FROM users WHERE id = $1 LIMIT 1',
-    [rowId]
+    [userId]
   );
-  const currentUser = currentUserResult.data?.[0] || null;
+  const currentUser = currentUserResult.data[0] || null;
 
   // Delete from storage if it exists in our bucket
   if (currentUser && currentUser.avatar_url && currentUser.avatar_url.includes(AVATARS_BUCKET)) {
@@ -572,9 +575,9 @@ async function removeUserAvatar(userId, userEmail = null) {
   try {
     const result = await executeDirectSQL(
       'UPDATE users SET avatar_url = $1, updated_at = $2 WHERE id = $3 RETURNING *',
-      [null, new Date().toISOString(), rowId]
+      [null, new Date().toISOString(), userId]
     );
-    data = result.data?.[0] || null;
+    data = result.data[0] || null;
   } catch (error) {
     throw new Error(error.message || 'Failed to remove avatar');
   }
@@ -584,7 +587,7 @@ async function removeUserAvatar(userId, userEmail = null) {
   }
 
   _invalidateProfileCache(userId);
-  const company = await getUserCompany(rowId);
+  const company = await getUserCompany(userId);
   return formatUserProfile(data, company);
 }
 
@@ -596,3 +599,4 @@ module.exports = {
   userExists,
   getUserCompany
 };
+

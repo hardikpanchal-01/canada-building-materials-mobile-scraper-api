@@ -40,7 +40,7 @@ function buildFilteredOrdersCTE(dateFrom, dateTo, exclusionPatterns, userAccess)
 
     if (userAccess.allowedPlants && userAccess.allowedPlants.length > 0) {
       const placeholders = userAccess.allowedPlants.map((_, i) => `$${paramIndex + i}::text`).join(', ');
-      accessOrConditions.push(`EXISTS (SELECT 1 FROM order_products op_ac INNER JOIN order_product_schedules ops_ac ON ops_ac.order_product_id = op_ac.id WHERE op_ac.order_id = o.order_id AND (op_ac.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op_ac.is_mix = true) AND ops_ac.plant_code::text IN (${placeholders}))`);
+      accessOrConditions.push(`EXISTS (SELECT 1 FROM order_products op_ac INNER JOIN order_product_schedules ops_ac ON ops_ac.order_product_id = op_ac.id WHERE op_ac.order_id = o.order_id AND (op_ac.order_qty_unit = 'YDQ' AND op_ac.is_mix = true) AND ops_ac.plant_code::text IN (${placeholders}))`);
       queryParams.push(...userAccess.allowedPlants.map(p => String(p)));
       paramIndex += userAccess.allowedPlants.length;
     }
@@ -66,11 +66,9 @@ function buildFilteredOrdersCTE(dateFrom, dateTo, exclusionPatterns, userAccess)
     }
   }
 
-  // Order eligibility: ANY order that has at least one product line — mirrors the
-  // web's getAllSummaryData (counts orders with products, NOT is_mix-gated, because
-  // the COMMANDseries sync has historically mis-set is_mix on valid concrete lines).
-  // Volume (Production & Delivery) still counts only concrete volume lines, keyed
-  // off the UOM (m3/CY), exactly like the web's computeCY() helper.
+  // Order eligibility: order has at least one CY-unit mix product. Matches
+  // web frontend INNER JOIN on (CY AND is_mix=true) so summary counts mirror
+  // web getAllSummaryData / market summary card.
   const cteSql = `WITH filtered_orders AS (
     SELECT
       o.order_id,
@@ -79,16 +77,15 @@ function buildFilteredOrdersCTE(dateFrom, dateTo, exclusionPatterns, userAccess)
       o.remove_reason_code,
       SUM(CASE WHEN NOT (o.removed = true AND o.remove_reason_code IS NOT NULL
           AND TRIM(o.remove_reason_code) <> '')
-          AND op.order_qty_unit IN ('m3', 'M3', 'CY', 'YDQ')
         THEN COALESCE(op.order_qty, 0) ELSE 0 END) as total_cy,
       SUM(CASE WHEN NOT (o.removed = true AND o.remove_reason_code IS NOT NULL
           AND TRIM(o.remove_reason_code) <> '')
-          AND op.order_qty_unit IN ('m3', 'M3', 'CY', 'YDQ')
         THEN COALESCE(op.delv_qty, 0) ELSE 0 END) as used_cy,
       BOOL_OR(o.removed = true AND o.remove_reason_code IS NOT NULL
           AND TRIM(o.remove_reason_code) <> '') as is_cancelled
     FROM orders o
     INNER JOIN order_products op ON op.order_id = o.order_id
+      AND op.order_qty_unit = 'YDQ' AND op.is_mix = true
     WHERE ${whereConditions.join(' AND ')}
     GROUP BY o.order_id, o.pricing_plant_code, o.removed, o.remove_reason_code
   )`;
@@ -150,18 +147,7 @@ async function getCombinedSummary(dateFrom, dateTo, exclusionPatterns, userAcces
     FROM filtered_orders fo
     JOIN plants p ON p.code = fo.pricing_plant_code
     LEFT JOIN regions r ON r.id = p.region_id
-    GROUP BY p.id, p.code, p.description, r.description
-
-    UNION ALL
-
-    SELECT 'tenant' as summary_type,
-      '0' as id, '0' as code, NULL as name, NULL as extra_name,
-      COUNT(*) as total_orders,
-      COUNT(*) FILTER (WHERE NOT fo.is_cancelled) as active_orders,
-      COUNT(*) FILTER (WHERE fo.is_cancelled) as cancelled_orders,
-      ROUND(SUM(fo.total_cy)::numeric, 2) as total_cy,
-      ROUND(SUM(fo.used_cy)::numeric, 2) as used_cy
-    FROM filtered_orders fo`;
+    GROUP BY p.id, p.code, p.description, r.description`;
 
   const result = await executeDirectSQL(sql, params);
   const rows = result.data || [];
@@ -170,7 +156,6 @@ async function getCombinedSummary(dateFrom, dateTo, exclusionPatterns, userAcces
   const companies = [];
   const regions = [];
   const plants = [];
-  let tenantAgg = null; // tenant-wide aggregate (no plant join) — used when orders carry no pricing_plant_code
 
   for (const row of rows) {
     const totalOrders = parseInt(row.total_orders) || 0;
@@ -207,10 +192,6 @@ async function getCombinedSummary(dateFrom, dateTo, exclusionPatterns, userAcces
           weather: null
         });
         break;
-
-      case 'tenant':
-        tenantAgg = { totalOrders, activeOrders, cancelledOrders, totalCY, usedCY };
-        break;
     }
   }
 
@@ -219,37 +200,25 @@ async function getCombinedSummary(dateFrom, dateTo, exclusionPatterns, userAcces
   // which presents a single tenant-level "company" aggregate. Synthesize it from
   // the per-plant rows: each order maps to exactly one plant via
   // pricing_plant_code, so summing plant counts gives distinct-order totals.
-  // CBM orders carry no pricing_plant_code (and plants use placeholder code '0'),
-  // so the plant/company JOINs above yield nothing. Mirror the web's single
-  // tenant-level "company" card: prefer summing the per-plant rows when present,
-  // otherwise fall back to the tenant-wide aggregate computed straight from the
-  // eligible orders (no plant join required).
-  if (companies.length === 0) {
-    let agg = null;
-    if (plants.length > 0) {
-      agg = plants.reduce((a, p) => ({
-        totalOrders: a.totalOrders + p.totalOrders,
-        activeOrders: a.activeOrders + p.activeOrders,
-        cancelledOrders: a.cancelledOrders + p.cancelledOrders,
-        totalCY: a.totalCY + p.totalCY,
-        usedCY: a.usedCY + p.usedCY
-      }), { totalOrders: 0, activeOrders: 0, cancelledOrders: 0, totalCY: 0, usedCY: 0 });
-    } else if (tenantAgg && tenantAgg.totalOrders > 0) {
-      agg = tenantAgg;
-    }
+  if (companies.length === 0 && plants.length > 0) {
+    const agg = plants.reduce((a, p) => ({
+      totalOrders: a.totalOrders + p.totalOrders,
+      activeOrders: a.activeOrders + p.activeOrders,
+      cancelledOrders: a.cancelledOrders + p.cancelledOrders,
+      totalCY: a.totalCY + p.totalCY,
+      usedCY: a.usedCY + p.usedCY
+    }), { totalOrders: 0, activeOrders: 0, cancelledOrders: 0, totalCY: 0, usedCY: 0 });
 
-    if (agg) {
-      companies.push({
-        id: '0',
-        code: '0',
-        name: process.env.PRODUCER_NAME || process.env.TENANT_NAME || 'Company',
-        totalOrders: agg.totalOrders,
-        activeOrders: agg.activeOrders,
-        cancelledOrders: agg.cancelledOrders,
-        totalCY: parseFloat(agg.totalCY.toFixed(2)),
-        usedCY: parseFloat(agg.usedCY.toFixed(2))
-      });
-    }
+    companies.push({
+      id: '0',
+      code: '0',
+      name: process.env.PRODUCER_NAME || process.env.TENANT_NAME || 'Company',
+      totalOrders: agg.totalOrders,
+      activeOrders: agg.activeOrders,
+      cancelledOrders: agg.cancelledOrders,
+      totalCY: parseFloat(agg.totalCY.toFixed(2)),
+      usedCY: parseFloat(agg.usedCY.toFixed(2))
+    });
   }
 
   // Sort each group to match original ordering

@@ -4,14 +4,20 @@
  * Direct PostgreSQL connection for the central auth database (auth_tenant schema:
  * tenants, users, tenant_users, auth_codes, login_attempts).
  *
- * CENTRAL_AUTH_DATABASE_URL (or AUTH_DATABASE_URL) is required for central auth
- * queries. If not set, executeAuthSQL will throw rather than silently failing.
+ * AUTH_DATABASE_URL is REQUIRED. There is no fallback any more.
+ *
+ * There used to be one, and it was dangerous: when the admin app was cut over
+ * to Postgres, this service still had AUTH_DATABASE_URL unset, so it silently
+ * kept reading auth codes from the old database. Codes were written to one database and
+ * looked up in another, so every exchange returned INVALID_CODE and nothing in
+ * the logs said why. Missing configuration now stops the process at startup
+ * instead of turning into a split brain that only shows up as failed logins.
  */
 
 const pg = require('pg');
 const { Pool } = pg;
 
-const RAW_AUTH_DATABASE_URL = process.env.CENTRAL_AUTH_DATABASE_URL || process.env.AUTH_DATABASE_URL;
+const RAW_AUTH_DATABASE_URL = process.env.AUTH_DATABASE_URL;
 const QUERY_TIMEOUT_MS = parseInt(process.env.DB_QUERY_TIMEOUT_MS) || 30000;
 
 // Strip any `sslmode=...` from the URL so pg-connection-string doesn't force
@@ -42,18 +48,20 @@ if (AUTH_DATABASE_URL) {
     statement_timeout: QUERY_TIMEOUT_MS,
     // Accept the CloudNativePG self-signed cert; only fully disable TLS when
     // the URL explicitly said sslmode=disable.
-    ssl: AUTH_SSL_DISABLED ? false : { rejectUnauthorized: false },
-    // Central-auth tables live in the auth_tenant schema
-    options: '-c search_path=auth_tenant,public',
+    ssl: AUTH_SSL_DISABLED ? false : { rejectUnauthorized: false }
   });
 
   authPool.on('error', (err) => {
     console.error('Auth PostgreSQL pool error:', err.message || err);
   });
 
-  console.log('✅ Auth PostgreSQL pool configured (CENTRAL_AUTH_DATABASE_URL)');
+  console.log('✅ Auth PostgreSQL pool configured (AUTH_DATABASE_URL)');
 } else {
-  console.warn('⚠️  Auth database URL not configured — auth features will be unavailable.');
+  console.error('❌ FATAL: AUTH_DATABASE_URL is not set.');
+  console.error('   Central auth (tenants, users, auth_codes) requires the central_auth');
+  console.error('   PostgreSQL database. There is no longer a fallback,');
+  console.error('   and continuing would silently break every login.');
+  throw new Error('AUTH_DATABASE_URL is required for central auth');
 }
 
 /**
@@ -76,7 +84,7 @@ async function executeAuthSQL(sqlQuery, params = [], options = {}) {
   const { maxRetries = 3 } = options;
 
   if (!authPool) {
-    throw new Error('Auth PostgreSQL pool not configured. Please set CENTRAL_AUTH_DATABASE_URL or AUTH_DATABASE_URL.');
+    throw new Error('Auth PostgreSQL pool not configured. Please set AUTH_DATABASE_URL.');
   }
 
   let lastError = null;

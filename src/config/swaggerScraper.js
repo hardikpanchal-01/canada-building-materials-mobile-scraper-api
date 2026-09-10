@@ -20,7 +20,7 @@ API for ingesting scraped order data from external Python scrapers.
 
 This API provides endpoints for receiving order data that has been
 scraped from external dispatch systems. The data is validated, sanitized,
-stored in Postgres Storage as JSON, and tracked in PostgreSQL.
+stored in S3 storage as JSON, and tracked in PostgreSQL.
 
 ## Authentication
 
@@ -52,7 +52,7 @@ Error codes:
     },
     servers: [
       {
-        url: process.env.API_BASE_URL || 'https://api.truckast.ai',
+        url: process.env.API_BASE_URL || 'http://api.truckast.ai',
         description: process.env.NODE_ENV === 'production' ? 'Production Server' : 'Development Server'
       }
     ],

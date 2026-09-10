@@ -74,7 +74,7 @@ const dashboardService = require('../services/dashboardService');
  *                         company:
  *                           type: string
  *                           nullable: true
- *                           example: "Stevenson Weir"
+ *                           example: "Dolese Ready Mix"
  *                     notifications:
  *                       type: object
  *                       description: Notification counts
@@ -281,7 +281,7 @@ const dashboardService = require('../services/dashboardService');
  *                   fullName: "John Smith"
  *                   email: "john@example.com"
  *                   avatarUrl: null
- *                   company: "Stevenson Weir"
+ *                   company: "Dolese Ready Mix"
  *                 notifications:
  *                   unread_count: 2
  *                 weather:

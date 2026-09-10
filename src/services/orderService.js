@@ -5,7 +5,7 @@
  * Provides order listing, filtering, and detail retrieval.
  *
  * Filters applied:
- * 1. Only products with order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND is_mix = true (concrete mixes only)
+ * 1. Only products with order_qty_unit = 'YDQ' AND is_mix = true (concrete mixes only)
  * 2. Cancelled = removed=true AND remove_reason_code is non-empty (AND, not OR)
  * 3. Applies exclusion patterns from excluded_order_patterns table
  *    - Customer / Product / Delivery address: substring LIKE match
@@ -118,7 +118,7 @@ let _progressBarColorsCacheTime = 0;
 const PROGRESS_COLORS_CACHE_TTL = 0;
 
 /**
- * Fetch progress bar colors from system_config table in Postgres.
+ * Fetch progress bar colors from system_config table.
  * Returns a map like { loading: '#FFC107', to_job: '#2196F3', ... }
  * Fully dynamic — returns only DB colors, no hardcoded defaults.
  */
@@ -248,7 +248,7 @@ function buildDeliveryProgress(totalQty, qtyByStatus, colorMap, countByStatus) {
       status_display: s.status_display,
       qty: s.qty,
       percentage: pct1(s.qty, displayTotal),
-      label: `${s.qty.toFixed(1)} ${process.env.VOLUME_UNIT || 'CY'} ${s.status_display}`,
+      label: `${s.qty.toFixed(1)} y³ ${s.status_display}`,
       color: effectiveColorMap[s.colorKey] || effectiveColorMap[s.status] || null,
       ticketCount: s.ticketCount
     })),
@@ -257,7 +257,7 @@ function buildDeliveryProgress(totalQty, qtyByStatus, colorMap, countByStatus) {
       status_display: 'Remaining',
       qty: remainingQty,
       percentage: pct1(remainingQty, displayTotal),
-      label: `${remainingQty.toFixed(1)} ${process.env.VOLUME_UNIT || 'CY'} Remaining`,
+      label: `${remainingQty.toFixed(1)} y³ Remaining`,
       color: effectiveColorMap['remaining'] || null,
       ticketCount: 0
     }
@@ -423,46 +423,6 @@ function formatDate(date) {
   const month = String(date.getMonth() + 1).padStart(2, '0');
   const day = String(date.getDate()).padStart(2, '0');
   return `${year}-${month}-${day}`;
-}
-
-/**
- * Convert a calendar date (YYYY-MM-DD) to the UTC instant of that day's midnight
- * in the given IANA timezone, returned as an ISO timestamp string. DST-safe via
- * a two-pass offset resolution.
- *
- * Used to build tenant-timezone-aware order_date filter bounds. order_date is a
- * `timestamp with time zone`; filtering on tenant-local midnight (rather than
- * plain date strings, which Postgres evaluates in the UTC session) keeps the
- * mobile day boundary identical to the web frontend.
- *
- * @param {string} dateStr - Calendar date 'YYYY-MM-DD'
- * @param {string} timeZone - IANA timezone (e.g. 'America/New_York')
- * @returns {string} ISO UTC timestamp of local midnight (e.g. '2026-06-09T04:00:00.000Z')
- */
-function zonedMidnightToUTCISO(dateStr, timeZone) {
-  const [y, m, d] = dateStr.split('-').map(Number);
-  const baseUTC = Date.UTC(y, m - 1, d, 0, 0, 0);
-
-  // Offset (local - utc, in ms) that `timeZone` has at a given UTC instant.
-  const offsetMsAt = (utcMs) => {
-    const parts = new Intl.DateTimeFormat('en-US', {
-      timeZone,
-      hour12: false,
-      year: 'numeric', month: '2-digit', day: '2-digit',
-      hour: '2-digit', minute: '2-digit', second: '2-digit'
-    }).formatToParts(new Date(utcMs));
-    const p = {};
-    for (const part of parts) p[part.type] = part.value;
-    const hour = p.hour === '24' ? 0 : Number(p.hour);
-    const localAsUTC = Date.UTC(Number(p.year), Number(p.month) - 1, Number(p.day), hour, Number(p.minute), Number(p.second));
-    return localAsUTC - utcMs;
-  };
-
-  // Two-pass: estimate with the offset at UTC-midnight, then refine so DST
-  // transitions resolve to the correct local-midnight instant.
-  let utc = baseUTC - offsetMsAt(baseUTC);
-  utc = baseUTC - offsetMsAt(utc);
-  return new Date(utc).toISOString();
 }
 
 /**
@@ -730,27 +690,22 @@ async function getOrders(params = {}, userAccess = null) {
     tab
   } = params;
 
-  const userTz = userAccess?.timezone || null;
-  // The orders "day" follows the tenant's business timezone (BUSINESS_TIMEZONE),
-  // matching the web frontend — not the DB session TZ or the user's personal tz.
-  const tzIana = process.env.BUSINESS_TIMEZONE || userTz?.iana || 'America/New_York';
-  // Display formatting uses the user's personal timezone when set, otherwise the
-  // tenant business timezone — never an unrelated default (previously Central).
-  const tz = userTz || { iana: tzIana };
+  const tz = userAccess?.timezone || null;
 
-  // Determine date range (computed in the tenant timezone so "today" is correct)
+  // Determine date range
   let dateRange;
   if (start_date && end_date) {
     dateRange = { startDate: start_date, endDate: end_date };
   } else {
-    dateRange = getDateRange(date_filter, { iana: tzIana });
+    dateRange = getDateRange(date_filter, tz);
   }
 
   // Fetch exclusion patterns and progress bar colors in parallel.
-  // Use affects_counts=true subset so order counts mirror the web frontend
-  // summary card (src/actions/orderActions.ts getAllSummaryData).
+  // Apply the full active pattern set (no affects_counts gate) so counts match
+  // the web RPC get_orders_summary (truckast-dolese-readymix-frontend migration
+  // 20260511000005_align_both_rpcs_to_source_filter), which ignores the flag.
   const [exclusionPatterns, progressBarColors] = await Promise.all([
-    fetchExclusionPatterns({ affectsCountsOnly: true }),
+    fetchExclusionPatterns(),
     fetchProgressBarColors()
   ]);
 
@@ -760,20 +715,12 @@ async function getOrders(params = {}, userAccess = null) {
   endDateObj.setDate(endDateObj.getDate() + 1);
   const endDateExclusive = formatDate(endDateObj);
 
-  // order_date is `timestamp with time zone`. Comparing it against plain date
-  // strings would be evaluated in the DB session TZ (UTC) and mis-bucket
-  // late-evening local orders into the wrong day. Convert the window to the
-  // tenant timezone's local midnight (as UTC timestamptz) so the day boundary
-  // matches the web frontend exactly (half-open [start, end)).
-  const startBound = zonedMidnightToUTCISO(dateRange.startDate, tzIana);
-  const endBound = zonedMidnightToUTCISO(endDateExclusive, tzIana);
-
   // Build query with all required filters
   let whereConditions = [
     'o.order_date >= $1',
     'o.order_date < $2'
   ];
-  let queryParams = [startBound, endBound];
+  let queryParams = [dateRange.startDate, endDateExclusive];
   let paramIndex = 3;
 
   // Add exclusion pattern filters.
@@ -856,7 +803,7 @@ async function getOrders(params = {}, userAccess = null) {
       SELECT 1 FROM order_products op_pcf
       INNER JOIN order_product_schedules ops_pcf ON ops_pcf.order_product_id = op_pcf.id
       WHERE op_pcf.order_id = o.order_id
-        AND (op_pcf.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op_pcf.is_mix = true)
+        AND (op_pcf.order_qty_unit = 'YDQ' AND op_pcf.is_mix = true)
         AND ops_pcf.plant_code::text = $${paramIndex}
     )`);
     queryParams.push(plant_code.trim());
@@ -870,7 +817,7 @@ async function getOrders(params = {}, userAccess = null) {
       INNER JOIN order_product_schedules ops_pnf ON ops_pnf.order_product_id = op_pnf.id
       INNER JOIN plants p_pnf ON p_pnf.code = ops_pnf.plant_code
       WHERE op_pnf.order_id = o.order_id
-        AND (op_pnf.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op_pnf.is_mix = true)
+        AND (op_pnf.order_qty_unit = 'YDQ' AND op_pnf.is_mix = true)
         AND p_pnf.description ILIKE $${paramIndex}
     )`);
     queryParams.push(`%${plant_name.trim().toLowerCase()}%`);
@@ -889,7 +836,7 @@ async function getOrders(params = {}, userAccess = null) {
         SELECT 1 FROM order_products op_access
         INNER JOIN order_product_schedules ops_access ON ops_access.order_product_id = op_access.id
         WHERE op_access.order_id = o.order_id
-          AND (op_access.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op_access.is_mix = true)
+          AND (op_access.order_qty_unit = 'YDQ' AND op_access.is_mix = true)
           AND ops_access.plant_code::text IN (${plantPlaceholders})
       )`);
       queryParams.push(...userAccess.allowedPlants.map(p => String(p)));
@@ -1060,20 +1007,19 @@ async function getOrders(params = {}, userAccess = null) {
   // pagination via LIMIT/OFFSET, counts via window functions
   const sql = `
     WITH order_totals AS (
-      -- Order eligibility: every order with >=1 order_product, regardless of unit.
-      -- Mirrors the web get_orders_paginated after migration 20260603000001
-      -- ("show all units") so the mobile list matches the web Orders table.
-      -- Concrete volume columns still sum only IN ('YDQ','CY') AND is_mix rows,
-      -- so non-concrete orders show 0 CY instead of being dropped.
+      -- Order eligibility: order has at least one CY-unit mix product.
+      -- Matches web frontend INNER JOIN on (CY AND is_mix=true) so mobile
+      -- counts mirror the web getAllSummaryData / market summary card.
       SELECT
         op.order_id,
-        SUM(CASE WHEN op.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op.is_mix = true THEN COALESCE(op.order_qty, 0) ELSE 0 END) as ordered_qty,
-        SUM(CASE WHEN op.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op.is_mix = true THEN COALESCE(op.delv_qty, 0) ELSE 0 END) as delivered_qty,
+        SUM(COALESCE(op.order_qty, 0)) as ordered_qty,
+        SUM(COALESCE(op.delv_qty, 0)) as delivered_qty,
         STRING_AGG(DISTINCT op.item_code, ', ') as product_codes,
         STRING_AGG(DISTINCT op.description, ', ') FILTER (WHERE op.description IS NOT NULL AND op.description != '') as product_description
       FROM order_products op
       INNER JOIN orders o_ot ON o_ot.order_id = op.order_id
-      WHERE o_ot.order_date >= $1 AND o_ot.order_date < $2
+      WHERE op.order_qty_unit = 'YDQ' AND op.is_mix = true
+        AND o_ot.order_date >= $1 AND o_ot.order_date < $2
       GROUP BY op.order_id
     ),
     order_schedules AS (
@@ -1104,7 +1050,7 @@ async function getOrders(params = {}, userAccess = null) {
         WHERE opsl.order_product_schedule_id = ops.id
           AND COALESCE(t.end_unload, t.wash_time) IS NOT NULL
       ) sub ON true
-      WHERE (op.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op.is_mix = true)
+      WHERE (op.order_qty_unit = 'YDQ' AND op.is_mix = true)
         AND o_os.order_date >= $1 AND o_os.order_date < $2
       GROUP BY op.order_id
     ),
@@ -1116,7 +1062,7 @@ async function getOrders(params = {}, userAccess = null) {
       FROM order_products op
       INNER JOIN order_product_schedules ops ON ops.order_product_id = op.id
       INNER JOIN orders o_opl ON o_opl.order_id = op.order_id
-      WHERE (op.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op.is_mix = true)
+      WHERE (op.order_qty_unit = 'YDQ' AND op.is_mix = true)
         AND ops.plant_code IS NOT NULL
         AND o_opl.order_date >= $1 AND o_opl.order_date < $2
       GROUP BY op.order_id
@@ -1172,14 +1118,9 @@ async function getOrders(params = {}, userAccess = null) {
         FROM tickets t_tp
         INNER JOIN orders o_tpg ON o_tpg.order_id = t_tp.order_id
         LEFT JOIN LATERAL (
-          -- Concrete line's load qty. Prefer is_mix=true, but CBM's ticket_products
-          -- are mis-tagged (is_mix=false, unit '40013'/null), so also accept volume
-          -- units. Without this the progress bar gets load_qty=0 → all-gray.
           SELECT tp2.load_qty
           FROM ticket_products tp2
-          WHERE tp2.ticket_id = t_tp.ticket_id
-            AND (tp2.is_mix = true OR tp2.order_qty_unit IN ('m3', 'M3', 'CY', 'YDQ', '40013'))
-          ORDER BY (tp2.is_mix = true) DESC, tp2.load_qty DESC NULLS LAST
+          WHERE tp2.ticket_id = t_tp.ticket_id AND tp2.is_mix = true
           LIMIT 1
         ) tp_sum ON true
         WHERE o_tpg.order_date >= $1 AND o_tpg.order_date < $2
@@ -1672,7 +1613,7 @@ async function getOrderByCodeAndDate(orderCode, orderDate, tz = null, loadsPagin
     INNER JOIN orders o ON o.order_id = op.order_id
     WHERE o.order_code = $1
       AND o.order_date >= $2::date AND o.order_date < ($2::date + INTERVAL '1 day')
-      AND (op.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op.is_mix = true)
+      AND (op.order_qty_unit = 'YDQ' AND op.is_mix = true)
     ORDER BY op.id
   `;
 
@@ -1703,7 +1644,7 @@ async function getOrderByCodeAndDate(orderCode, orderDate, tz = null, loadsPagin
     LEFT JOIN plants p ON p.code = ops.plant_code
     WHERE o.order_code = $1
       AND o.order_date >= $2::date AND o.order_date < ($2::date + INTERVAL '1 day')
-      AND (op.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op.is_mix = true)
+      AND (op.order_qty_unit = 'YDQ' AND op.is_mix = true)
     ORDER BY ops.start_time ASC
   `;
 
@@ -1799,7 +1740,7 @@ async function getOrderByCodeAndDate(orderCode, orderDate, tz = null, loadsPagin
     ) sp ON true
     WHERE o.order_code = $1
       AND o.order_date >= $2::date AND o.order_date < ($2::date + INTERVAL '1 day')
-      AND (op.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op.is_mix = true)
+      AND (op.order_qty_unit = 'YDQ' AND op.is_mix = true)
     ORDER BY tp.acc_delv_qty ASC NULLS LAST, ops.start_time ASC NULLS LAST
   `;
 
@@ -1834,7 +1775,7 @@ async function getOrderByCodeAndDate(orderCode, orderDate, tz = null, loadsPagin
       AND (t.remove_reason_code IS NULL OR TRIM(t.remove_reason_code) = '')
     WHERE o.order_code = $1
       AND o.order_date >= $2::date AND o.order_date < ($2::date + INTERVAL '1 day')
-      AND (op.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op.is_mix = true)
+      AND (op.order_qty_unit = 'YDQ' AND op.is_mix = true)
     GROUP BY ops.id, ops.start_time, ops.number_of_loads, ops.unload_time, ops.truck_space
     ORDER BY ops.start_time ASC
   `;
@@ -1844,7 +1785,7 @@ async function getOrderByCodeAndDate(orderCode, orderDate, tz = null, loadsPagin
   // Uses extract(epoch) for unambiguous UTC timestamps — avoids pg driver timezone parsing issues
   // CRITICAL ordering: match the web's fetchProductSchedule exactly.
   //
-  // Web uses Postgres `.from("order_products").eq("order_id", ...)` with a
+  // Web uses `.from("order_products").eq("order_id", ...)` with a
   // nested `order_product_schedules(...)` relation and NO explicit ordering
   // (see orderTabDataActions.ts fetchProductSchedule lines 145-315). That
   // returns rows in PostgREST default order — which is primary-key ASC for
@@ -1863,7 +1804,7 @@ async function getOrderByCodeAndDate(orderCode, orderDate, tz = null, loadsPagin
   //
   // Fix: sort by op.id ASC, then ops.id ASC — exactly matching web.
   //
-  // IMPORTANT: do NOT filter on `order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3')`. The web reducer
+  // IMPORTANT: do NOT filter on `order_qty_unit = 'YDQ'`. The web reducer
   // (truckast-dolese-readymix-frontend/src/app/(protected)/orders/
   // _components/performance-charts.tsx lines 1511-1535 and 1751-1765)
   // ONLY filters by `is_mix` when selecting the primary schedule — it
@@ -1930,7 +1871,7 @@ async function getOrderByCodeAndDate(orderCode, orderDate, tz = null, loadsPagin
     INNER JOIN orders o ON o.order_id = t.order_id
     LEFT JOIN LATERAL (
       -- Deterministic: web uses Array.find(p => p.is_mix === true) which
-      -- picks the FIRST is_mix product in Postgres's default (physical/
+      -- picks the FIRST is_mix product in the default (physical/
       -- insertion) order — effectively id ASC on a fresh table. ORDER BY
       -- tp2.id ASC makes the backend pick the same row the web would,
       -- eliminating a non-deterministic source of load_qty drift when a
@@ -1985,7 +1926,7 @@ async function getOrderByCodeAndDate(orderCode, orderDate, tz = null, loadsPagin
     LEFT JOIN plants p ON p.code = ops.plant_code
     WHERE o.order_code = $1
       AND o.order_date >= $2::date AND o.order_date < ($2::date + INTERVAL '1 day')
-      AND (op.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op.is_mix = true)
+      AND (op.order_qty_unit = 'YDQ' AND op.is_mix = true)
     ORDER BY ops.start_time ASC
   `;
 
@@ -2176,7 +2117,7 @@ async function getOrderByCodeAndDate(orderCode, orderDate, tz = null, loadsPagin
     ) tp ON true
     WHERE o.order_code = $1
       AND o.order_date >= $2::date AND o.order_date < ($2::date + INTERVAL '1 day')
-      AND (op.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op.is_mix = true)
+      AND (op.order_qty_unit = 'YDQ' AND op.is_mix = true)
     ORDER BY opsl.schedule_load_id ASC
     LIMIT $3 OFFSET $4
   `;
@@ -2202,7 +2143,7 @@ async function getOrderByCodeAndDate(orderCode, orderDate, tz = null, loadsPagin
     LEFT JOIN tickets t ON t.ticket_code = opsl.ticket_code AND t.order_id = o.order_id
     WHERE o.order_code = $1
       AND o.order_date >= $2::date AND o.order_date < ($2::date + INTERVAL '1 day')
-      AND (op.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op.is_mix = true)
+      AND (op.order_qty_unit = 'YDQ' AND op.is_mix = true)
   `;
 
   // Calculate pagination offset
@@ -2875,32 +2816,23 @@ async function getOrderByCodeAndDate(orderCode, orderDate, tz = null, loadsPagin
  */
 async function getOrdersSummary(params = {}, userAccess = null) {
   const { date_filter = 'today', start_date, end_date, company_name, region_name, plant_code, plant_name } = params;
-  const userTz = userAccess?.timezone || null;
-  // The summary "day" follows the tenant business timezone (matches the web).
-  const tzIana = process.env.BUSINESS_TIMEZONE || userTz?.iana || 'America/New_York';
+  const tz = userAccess?.timezone || null;
 
-  // Determine date range (computed in the tenant timezone so "today" is correct)
+  // Determine date range
   let dateRange;
   if (start_date && end_date) {
     dateRange = { startDate: start_date, endDate: end_date };
   } else {
-    dateRange = getDateRange(date_filter, { iana: tzIana });
+    dateRange = getDateRange(date_filter, tz);
   }
 
-  // Tenant-timezone-aware half-open [start, end) bounds for the timestamptz
-  // order_date column, so the day boundary matches the web frontend.
-  const startBound = zonedMidnightToUTCISO(dateRange.startDate, tzIana);
-  const endObj = new Date(dateRange.endDate + 'T00:00:00');
-  endObj.setDate(endObj.getDate() + 1);
-  const endBound = zonedMidnightToUTCISO(formatDate(endObj), tzIana);
-
-  // Fetch exclusion patterns for filtering (affects_counts subset — matches
-  // web frontend getAllSummaryData so summary counts align).
-  const exclusionPatterns = await fetchExclusionPatterns({ affectsCountsOnly: true });
+  // Full active pattern set — matches web RPC get_orders_summary (which
+  // ignores affects_counts as of migration 20260511000005).
+  const exclusionPatterns = await fetchExclusionPatterns();
 
   // Build WHERE conditions
   let extraConditions = '';
-  let queryParams = [startBound, endBound];
+  let queryParams = [dateRange.startDate, dateRange.endDate];
   let paramIndex = 3;
 
   // Add exclusion pattern filters.
@@ -2961,23 +2893,27 @@ async function getOrdersSummary(params = {}, userAccess = null) {
     paramIndex++;
   }
 
-  // Plant code filter (exact match via order_product_schedules)
+  // Plant code filter (order-level: include order if ANY CY mix product is at this plant)
   if (plant_code && plant_code.trim()) {
     extraConditions += ` AND EXISTS (
-      SELECT 1 FROM order_product_schedules ops_pcf
-      WHERE ops_pcf.order_product_id = op.id
+      SELECT 1 FROM order_products op_pcf
+      INNER JOIN order_product_schedules ops_pcf ON ops_pcf.order_product_id = op_pcf.id
+      WHERE op_pcf.order_id = o.order_id
+        AND (op_pcf.order_qty_unit = 'YDQ' AND op_pcf.is_mix = true)
         AND ops_pcf.plant_code::text = $${paramIndex}
     )`;
     queryParams.push(plant_code.trim());
     paramIndex++;
   }
 
-  // Plant name filter (partial match via order_product_schedules → plants)
+  // Plant name filter (order-level: include order if ANY CY mix product is at matching plant)
   if (plant_name && plant_name.trim()) {
     extraConditions += ` AND EXISTS (
-      SELECT 1 FROM order_product_schedules ops_pnf
+      SELECT 1 FROM order_products op_pnf
+      INNER JOIN order_product_schedules ops_pnf ON ops_pnf.order_product_id = op_pnf.id
       INNER JOIN plants p_pnf ON p_pnf.code = ops_pnf.plant_code
-      WHERE ops_pnf.order_product_id = op.id
+      WHERE op_pnf.order_id = o.order_id
+        AND (op_pnf.order_qty_unit = 'YDQ' AND op_pnf.is_mix = true)
         AND p_pnf.description ILIKE $${paramIndex}
     )`;
     queryParams.push(`%${plant_name.trim().toLowerCase()}%`);
@@ -2985,12 +2921,14 @@ async function getOrdersSummary(params = {}, userAccess = null) {
   }
 
   // Access Control (zones already resolved to plants in auth.js)
+  // Order-level: include order if ANY CY mix product is at an allowed plant.
+  // Matches getOrders and getTodayOverview so status counts are consistent.
   if (userAccess && !userAccess.isAdmin) {
     const accessOrParts = [];
 
     if (userAccess.allowedPlants && userAccess.allowedPlants.length > 0) {
       const placeholders = userAccess.allowedPlants.map((_, i) => `$${paramIndex + i}::text`).join(', ');
-      accessOrParts.push(`EXISTS (SELECT 1 FROM order_product_schedules ops WHERE ops.order_product_id = op.id AND ops.plant_code::text IN (${placeholders}))`);
+      accessOrParts.push(`EXISTS (SELECT 1 FROM order_products op_ac INNER JOIN order_product_schedules ops_ac ON ops_ac.order_product_id = op_ac.id WHERE op_ac.order_id = o.order_id AND (op_ac.order_qty_unit = 'YDQ' AND op_ac.is_mix = true) AND ops_ac.plant_code::text IN (${placeholders}))`);
       queryParams.push(...userAccess.allowedPlants.map(p => String(p)));
       paramIndex += userAccess.allowedPlants.length;
     }
@@ -3030,9 +2968,9 @@ async function getOrdersSummary(params = {}, userAccess = null) {
         SUM(COALESCE(op.delv_qty, 0)) as delivered_qty
       FROM orders o
       INNER JOIN order_products op ON op.order_id = o.order_id
-        AND op.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op.is_mix = true
-      WHERE o.order_date >= $1::timestamptz
-        AND o.order_date < $2::timestamptz
+        AND op.order_qty_unit = 'YDQ' AND op.is_mix = true
+      WHERE o.order_date >= $1::date
+        AND o.order_date < ($2::date + INTERVAL '1 day')
         ${extraConditions}
       GROUP BY o.order_id, o.removed, o.remove_reason_code, o.current_status
     ),
@@ -3051,7 +2989,7 @@ async function getOrdersSummary(params = {}, userAccess = null) {
       FROM tickets t
       INNER JOIN orders o_ltc ON o_ltc.order_id = t.order_id
       WHERE (t.remove_reason_code IS NULL OR TRIM(t.remove_reason_code) = '')
-        AND o_ltc.order_date >= $1::timestamptz AND o_ltc.order_date < $2::timestamptz
+        AND o_ltc.order_date >= $1::date AND o_ltc.order_date < ($2::date + INTERVAL '1 day')
       ORDER BY t.order_id, t.created_date DESC NULLS LAST
     ),
     order_statuses AS (
@@ -3155,38 +3093,28 @@ async function getOrdersSummary(params = {}, userAccess = null) {
  */
 async function getActiveTrackingOrders(params = {}, userAccess = null) {
   const { date_filter = 'today', start_date, end_date, company_name, region_name, plant_code, plant_name } = params;
-  const userTz = userAccess?.timezone || null;
-  // The tracking "day" follows the tenant business timezone (matches the web).
-  const tzIana = process.env.BUSINESS_TIMEZONE || userTz?.iana || 'America/New_York';
-  // Display formatting uses the user's personal tz when set, otherwise tenant tz.
-  const tz = userTz || { iana: tzIana };
+  const tz = userAccess?.timezone || null;
 
   let dateRange;
   if (start_date && end_date) {
     dateRange = { startDate: start_date, endDate: end_date };
   } else {
-    dateRange = getDateRange(date_filter, { iana: tzIana });
+    dateRange = getDateRange(date_filter, tz);
   }
 
-  // Tenant-timezone-aware half-open [start, end) bounds for the timestamptz
-  // order_date column, so the day boundary matches the web frontend.
-  const startBound = zonedMidnightToUTCISO(dateRange.startDate, tzIana);
-  const endObj = new Date(dateRange.endDate + 'T00:00:00');
-  endObj.setDate(endObj.getDate() + 1);
-  const endBound = zonedMidnightToUTCISO(formatDate(endObj), tzIana);
-
-  // affects_counts=true subset — matches web frontend getAllSummaryData
-  const exclusionPatterns = await fetchExclusionPatterns({ affectsCountsOnly: true });
+  // Full active pattern set — matches web RPC get_orders_summary (which
+  // ignores affects_counts as of migration 20260511000005).
+  const exclusionPatterns = await fetchExclusionPatterns();
 
   // Build WHERE conditions for orders.
   // status != 2 (Weather Permitting) is kept here because this endpoint
   // powers active-tracking views that exclude weather-held orders by design.
   let whereConditions = [
-    'o.order_date >= $1::timestamptz',
-    'o.order_date < $2::timestamptz',
+    'o.order_date >= $1::date',
+    'o.order_date < ($2::date + INTERVAL \'1 day\')',
     'COALESCE(o.current_status, 0) != 2'
   ];
-  let queryParams = [startBound, endBound];
+  let queryParams = [dateRange.startDate, dateRange.endDate];
   let paramIndex = 3;
 
   // Add exclusion pattern filters — matches web frontend filterExcludedOrders.
@@ -3252,7 +3180,7 @@ async function getActiveTrackingOrders(params = {}, userAccess = null) {
       SELECT 1 FROM order_products op_pcf
       INNER JOIN order_product_schedules ops_pcf ON ops_pcf.order_product_id = op_pcf.id
       WHERE op_pcf.order_id = o.order_id
-        AND (op_pcf.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op_pcf.is_mix = true)
+        AND (op_pcf.order_qty_unit = 'YDQ' AND op_pcf.is_mix = true)
         AND ops_pcf.plant_code::text = $${paramIndex}
     )`);
     queryParams.push(plant_code.trim());
@@ -3266,7 +3194,7 @@ async function getActiveTrackingOrders(params = {}, userAccess = null) {
       INNER JOIN order_product_schedules ops_pnf ON ops_pnf.order_product_id = op_pnf.id
       INNER JOIN plants p_pnf ON p_pnf.code = ops_pnf.plant_code
       WHERE op_pnf.order_id = o.order_id
-        AND (op_pnf.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op_pnf.is_mix = true)
+        AND (op_pnf.order_qty_unit = 'YDQ' AND op_pnf.is_mix = true)
         AND p_pnf.description ILIKE $${paramIndex}
     )`);
     queryParams.push(`%${plant_name.trim().toLowerCase()}%`);
@@ -3279,7 +3207,7 @@ async function getActiveTrackingOrders(params = {}, userAccess = null) {
 
     if (userAccess.allowedPlants && userAccess.allowedPlants.length > 0) {
       const placeholders = userAccess.allowedPlants.map((_, i) => `$${paramIndex + i}::text`).join(', ');
-      accessOrConditions.push(`EXISTS (SELECT 1 FROM order_products op_access INNER JOIN order_product_schedules ops_access ON ops_access.order_product_id = op_access.id WHERE op_access.order_id = o.order_id AND (op_access.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op_access.is_mix = true) AND ops_access.plant_code::text IN (${placeholders}))`);
+      accessOrConditions.push(`EXISTS (SELECT 1 FROM order_products op_access INNER JOIN order_product_schedules ops_access ON ops_access.order_product_id = op_access.id WHERE op_access.order_id = o.order_id AND (op_access.order_qty_unit = 'YDQ' AND op_access.is_mix = true) AND ops_access.plant_code::text IN (${placeholders}))`);
       queryParams.push(...userAccess.allowedPlants.map(p => String(p)));
       paramIndex += userAccess.allowedPlants.length;
     }
@@ -3319,8 +3247,8 @@ async function getActiveTrackingOrders(params = {}, userAccess = null) {
         STRING_AGG(DISTINCT op.description, ', ') FILTER (WHERE op.description IS NOT NULL AND op.description != '') as product_description
       FROM order_products op
       INNER JOIN orders o_ot ON o_ot.order_id = op.order_id
-      WHERE op.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3')
-        AND o_ot.order_date >= $1::timestamptz AND o_ot.order_date < $2::timestamptz
+      WHERE op.order_qty_unit = 'YDQ'
+        AND o_ot.order_date >= $1::date AND o_ot.order_date < ($2::date + INTERVAL '1 day')
       GROUP BY op.order_id
     ),
     order_schedules AS (
@@ -3350,8 +3278,8 @@ async function getActiveTrackingOrders(params = {}, userAccess = null) {
         WHERE opsl.order_product_schedule_id = ops.id
           AND COALESCE(t.end_unload, t.wash_time) IS NOT NULL
       ) sub ON true
-      WHERE (op.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op.is_mix = true)
-        AND o_os.order_date >= $1::timestamptz AND o_os.order_date < $2::timestamptz
+      WHERE (op.order_qty_unit = 'YDQ' AND op.is_mix = true)
+        AND o_os.order_date >= $1::date AND o_os.order_date < ($2::date + INTERVAL '1 day')
       GROUP BY op.order_id
     ),
     last_ticket_completion AS (
@@ -3369,7 +3297,7 @@ async function getActiveTrackingOrders(params = {}, userAccess = null) {
       FROM tickets t
       INNER JOIN orders o_ltc ON o_ltc.order_id = t.order_id
       WHERE (t.remove_reason_code IS NULL OR TRIM(t.remove_reason_code) = '')
-        AND o_ltc.order_date >= $1::timestamptz AND o_ltc.order_date < $2::timestamptz
+        AND o_ltc.order_date >= $1::date AND o_ltc.order_date < ($2::date + INTERVAL '1 day')
       ORDER BY t.order_id, t.created_date DESC NULLS LAST
     ),
     in_progress_orders AS (
@@ -4928,7 +4856,7 @@ async function getOrderTrackingById(orderId, params = {}, userAccess = null) {
 
     if (userAccess.allowedPlants?.length > 0) {
       const placeholders = userAccess.allowedPlants.map((_, i) => `$${paramIdx + i}::text`).join(', ');
-      accessOrParts.push(`EXISTS (SELECT 1 FROM order_products op INNER JOIN order_product_schedules ops ON ops.order_product_id = op.id WHERE op.order_id = o.order_id AND (op.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op.is_mix = true) AND ops.plant_code::text IN (${placeholders}))`);
+      accessOrParts.push(`EXISTS (SELECT 1 FROM order_products op INNER JOIN order_product_schedules ops ON ops.order_product_id = op.id WHERE op.order_id = o.order_id AND (op.order_qty_unit = 'YDQ' AND op.is_mix = true) AND ops.plant_code::text IN (${placeholders}))`);
       accessParams.push(...userAccess.allowedPlants.map(p => String(p)));
       paramIdx += userAccess.allowedPlants.length;
     }
@@ -5014,7 +4942,7 @@ async function getOrderTrackingById(orderId, params = {}, userAccess = null) {
       STRING_AGG(DISTINCT op.description, ', ') FILTER (WHERE op.description IS NOT NULL AND op.description != '') as product_description
     FROM order_products op
     WHERE op.order_id = $1
-      AND (op.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op.is_mix = true)
+      AND (op.order_qty_unit = 'YDQ' AND op.is_mix = true)
   `;
 
   // Query to count total tickets and status counts
@@ -5366,7 +5294,7 @@ async function getScheduledLoadsByOrder(orderCode, orderDate, tz = null, paginat
     ) tp ON true
     WHERE o.order_code = $1
       AND o.order_date >= $2::date AND o.order_date < ($2::date + INTERVAL '1 day')
-      AND (op.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op.is_mix = true)
+      AND (op.order_qty_unit = 'YDQ' AND op.is_mix = true)
     ORDER BY opsl.schedule_load_id ASC
     LIMIT $3 OFFSET $4
   `;
@@ -5392,7 +5320,7 @@ async function getScheduledLoadsByOrder(orderCode, orderDate, tz = null, paginat
     LEFT JOIN tickets t ON t.ticket_code = opsl.ticket_code AND t.order_id = o.order_id
     WHERE o.order_code = $1
       AND o.order_date >= $2::date AND o.order_date < ($2::date + INTERVAL '1 day')
-      AND (op.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op.is_mix = true)
+      AND (op.order_qty_unit = 'YDQ' AND op.is_mix = true)
   `;
 
   const page = pagination.page || 1;

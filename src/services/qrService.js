@@ -14,7 +14,7 @@ const { executeDirectSQL } = require('../utils/postgresExecutor');
 const { executeAuthSQL } = require('../config/authPostgres');
 
 /**
- * Resolve req.user id (UUID or numeric) -> tenant row via auth_tenant tables in
+ * Resolve req.user id (UUID or numeric) → tenant row via auth_tenant tables in
  * PostgreSQL. Returns the tenant row (selected columns) or null.
  */
 async function fetchTenantForUserSQL(userAccessId, tenantColumns) {
@@ -23,7 +23,7 @@ async function fetchTenantForUserSQL(userAccessId, tenantColumns) {
     numericUserId = Number(userAccessId);
   } else {
     const uResult = await executeAuthSQL(
-      'SELECT id FROM users WHERE uuid = $1 AND deleted_at IS NULL LIMIT 1',
+      'SELECT id FROM public.users WHERE uuid = $1 AND deleted_at IS NULL LIMIT 1',
       [userAccessId]
     );
     if (uResult.data.length === 0) return null;
@@ -32,19 +32,14 @@ async function fetchTenantForUserSQL(userAccessId, tenantColumns) {
 
   const tResult = await executeAuthSQL(
     `SELECT ${tenantColumns.map(c => `t.${c}`).join(', ')}
-     FROM tenant_users tu
-     JOIN tenants t ON t.id = tu.tenant_id AND t.deleted_at IS NULL
+     FROM public.tenant_users tu
+     JOIN public.tenants t ON t.id = tu.tenant_id AND t.deleted_at IS NULL
      WHERE tu.user_id = $1 AND tu.status = 'active'
      LIMIT 1`,
     [numericUserId]
   );
   return tResult.data.length > 0 ? tResult.data[0] : null;
 }
-
-// ── D3 format constants ──
-const D3_VERSION = Buffer.from([0x01, 0x00, 0x00, 0x00]);
-const D3_MAGIC   = Buffer.from([0x0d, 0xf0, 0xad, 0xba]);
-const D3_HEX_RE  = /^\[TK\/E\](01000000[0-9A-Fa-f]+)$/;
 
 /**
  * Fetch all ticket_products for a given ticket_code and attach to ticket object.
@@ -186,90 +181,6 @@ function decryptQrPayload(payload) {
 }
 
 /**
- * Derive a 24-byte TripleDES key from the D3 passphrase.
- * key16 = SHA1( passphrase as UTF-16LE )[0..16]
- * key24 = key16 + key16[0..8]   (two-key 3DES: K1 K2 K1)
- */
-function tripleDesKey(passphrase) {
-  const utf16le = Buffer.from(passphrase, 'utf16le');
-  const sha1 = crypto.createHash('sha1').update(utf16le).digest();
-  const k16 = sha1.subarray(0, 16);
-  return Buffer.concat([k16, k16.subarray(0, 8)]);
-}
-
-/**
- * Decrypt a D3-format QR text: [TK/E]01000000<hex>
- * Returns the decrypted URL string, or null if decryption fails.
- */
-function decryptD3QrText(text) {
-  const passphrase = process.env.D3_QR_PASSPHRASE;
-  if (!passphrase) {
-    console.error('[QR] D3_QR_PASSPHRASE not configured');
-    return null;
-  }
-
-  const m = D3_HEX_RE.exec(text);
-  if (!m || m[1].length % 2 !== 0) return null;
-
-  const blob = Buffer.from(m[1], 'hex');
-  if (blob.length < 20 || !blob.subarray(0, 4).equals(D3_VERSION)) return null;
-
-  const iv = blob.subarray(4, 12);
-  const ct = blob.subarray(12);
-  if (ct.length % 8 !== 0) return null;
-
-  let plain;
-  try {
-    const d = crypto.createDecipheriv('des-ede3-cbc', tripleDesKey(passphrase), iv);
-    plain = Buffer.concat([d.update(ct), d.final()]);
-  } catch {
-    return null;
-  }
-
-  if (plain.length < 8 || !plain.subarray(0, 4).equals(D3_MAGIC)) return null;
-
-  const authLen = plain.readUInt16LE(4);
-  const len = plain.readUInt16LE(6);
-  if (authLen !== 0 || 8 + len > plain.length) return null;
-
-  const payload = plain.subarray(8, 8 + len);
-  return payload.length % 2 === 0 ? payload.toString('utf16le') : payload.toString('latin1');
-}
-
-/**
- * Check if a raw QR string is in D3 hex format.
- */
-function isD3Format(payload) {
-  return D3_HEX_RE.test(payload);
-}
-
-/**
- * Extract ticket code from a Truckast tracking URL.
- * e.g. https://cbm.truckast.ai/t/36194717?sig=... → "36194717"
- */
-function extractTicketCodeFromUrl(url) {
-  try {
-    const parsed = new URL(url);
-    const match = /^\/t\/([^/?]+)/.exec(parsed.pathname);
-    return match ? match[1] : null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Parse a [TK/URI] prefix QR (D3 plain-link variant).
- * Returns the URL after the prefix.
- */
-function parseTkUri(payload) {
-  const prefix = '[TK/URI]';
-  if (payload.startsWith(prefix)) {
-    return payload.slice(prefix.length).trim();
-  }
-  return null;
-}
-
-/**
  * Parse a pipe-separated QR fallback string.
  *
  * Supported formats:
@@ -306,8 +217,8 @@ function parsePipePayload(payload) {
 
 /**
  * Fetch tenant-level QR settings for the authenticated user.
- * Resolves user UUID → tenant_id via auth_tenant.tenant_users, then reads
- * qr_enabled, qr_mode, and security_mode from auth_tenant.tenants.
+ * Resolves user UUID → tenant_id via public.tenant_users, then reads
+ * qr_enabled, qr_mode, and security_mode from public.tenants.
  *
  * @param {object} userAccess - req.user from auth middleware (has .id as UUID)
  * @returns {Promise<object|null>} { qr_enabled, qr_mode, security_mode } or null
@@ -340,52 +251,8 @@ async function getTenantQrSettings(userAccess) {
 async function verifyQrPayload(payload, userAccess) {
   // Step 1: Decrypt or parse the QR data
   let qrData;
-  let d3Meta = null; // populated when D3/URI format resolves to a URL
 
-  // Rule 3: [TK/URI] plain-link prefix
-  const tkUri = parseTkUri(payload);
-  if (tkUri) {
-    const ticketCode = extractTicketCodeFromUrl(tkUri);
-    if (!ticketCode) {
-      return { success: false, error_code: 'INVALID_FORMAT', message: 'Cannot extract ticket from [TK/URI] URL' };
-    }
-    qrData = { kind: 'ticket', ticketCode, orderCode: '', orderId: '', truckCode: '', truckId: '' };
-    d3Meta = { url: tkUri, format: 'd3-uri' };
-  }
-  // Rule 1: D3 hex format [TK/E]01000000...
-  else if (payload.startsWith(TK_PREFIX) && isD3Format(payload)) {
-    const url = decryptD3QrText(payload);
-    if (!url) {
-      return { success: false, error_code: 'DECRYPT_FAILED', message: 'D3 QR decryption failed (wrong passphrase or corrupted code)' };
-    }
-
-    // Check if URL points at our platform or D3's
-    try {
-      const parsed = new URL(url);
-      if (parsed.hostname === 'tkqrpdfapi.truckast.com') {
-        return {
-          success: false,
-          error_code: 'D3_EXTERNAL',
-          message: 'This D3 QR code does not point at a ticket on this platform.',
-          d3Url: url,
-        };
-      }
-    } catch { /* continue */ }
-
-    const ticketCode = extractTicketCodeFromUrl(url);
-    if (!ticketCode) {
-      return { success: false, error_code: 'INVALID_FORMAT', message: 'D3 QR decrypted but URL format not recognized' };
-    }
-
-    // Extract sig from URL
-    let sig = '';
-    try { sig = new URL(url).searchParams.get('sig') || ''; } catch {}
-
-    qrData = { kind: 'ticket', ticketCode, orderCode: '', orderId: '', truckCode: '', truckId: '' };
-    d3Meta = { url, sig, format: 'd3' };
-  }
-  // Rule 2: Legacy AES-256-GCM [TK/E] (base64 after prefix)
-  else if (payload.startsWith(TK_PREFIX)) {
+  if (payload.startsWith(TK_PREFIX)) {
     try {
       qrData = decryptQrPayload(payload);
     } catch (err) {
@@ -395,9 +262,7 @@ async function verifyQrPayload(payload, userAccess) {
         message: `Decryption failed: ${err.message}`,
       };
     }
-  }
-  // Rule 4: Pipe-separated fallback
-  else if (payload.includes('|')) {
+  } else if (payload.includes('|')) {
     qrData = parsePipePayload(payload);
     if (!qrData) {
       return {
@@ -440,7 +305,6 @@ async function verifyQrPayload(payload, userAccess) {
                 kind: 'ticket',
                 qrData,
                 security_mode,
-                d3Meta,
                 details: {
                   ticket,
                   order: orderData.order,
@@ -649,7 +513,6 @@ async function verifyQrPayload(payload, userAccess) {
                       kind: 'ticket',
                       qrData,
                       security_mode,
-                      d3Meta,
                       details: { ticket: richTicket, order, summary },
                     };
                   }
@@ -664,7 +527,6 @@ async function verifyQrPayload(payload, userAccess) {
               kind: 'ticket',
               qrData,
               security_mode,
-              d3Meta,
               details: { ticket, order, summary },
             };
           }
@@ -821,10 +683,6 @@ async function encryptPayload(body, userAccess) {
 
 module.exports = {
   decryptQrPayload,
-  decryptD3QrText,
-  isD3Format,
-  extractTicketCodeFromUrl,
-  parseTkUri,
   parsePipePayload,
   verifyQrPayload,
   getTenantQrSettings,

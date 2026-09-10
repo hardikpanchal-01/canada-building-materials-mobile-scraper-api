@@ -47,7 +47,7 @@ router.post('/notify', internalChatNotifyAuth, chatController.notifyChatMessage)
 // Chat file upload (images, audio)
 router.post('/upload', authenticate, handleUpload, chatDataController.uploadFile);
 
-// Direct PostgreSQL chat data endpoints
+// Direct PostgreSQL chat data endpoints (replaces client queries)
 router.get('/rooms', authenticate, chatDataController.getRooms);
 router.get('/rooms/:order_id', authenticate, chatDataController.getOrCreateRoom);
 router.get('/messages/:order_id', authenticate, chatDataController.getMessages);

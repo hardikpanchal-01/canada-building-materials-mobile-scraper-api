@@ -18,11 +18,6 @@ prompts/
 .env.staging
 .env.production
 
-# Google / Firebase service-account credentials — provide out-of-band (like .env)
-src/config/*firebase-adminsdk*.json
-*serviceaccount*.json
-*-adminsdk-*.json
-
 # -----------------------------------------------------------------------------
 # Logs
 # -----------------------------------------------------------------------------
@@ -76,7 +71,7 @@ temp/
 *.seed
 *.pid.lock
 
-# Local backups (e.g. revoked Firebase key kept for rollback)
-*.revoked-bak
-
 /docs
+# Firebase service-account key (secret — never commit)
+src/config/*firebase-adminsdk*.json
+*-adminsdk-*.json

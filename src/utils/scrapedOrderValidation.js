@@ -9,7 +9,6 @@
 const VALID_STATUSES = [
   'Normal',
   'Hold',
-  'Will Call',
   'Cancelled',
   'Completed',
   'Pending',
@@ -17,16 +16,9 @@ const VALID_STATUSES = [
 ];
 
 // Status value mappings (normalize variations)
-// 'confirmed' and 'will call' are added for the Connex extension's lite flow:
-// the Connex board shows "Confirmed" / "Will Call" badges, which map to the
-// Command Cloud vocabulary the comparison understands (isStatusEquivalent).
 const STATUS_MAPPINGS = {
   'normal': 'Normal',
-  'confirmed': 'Normal',
   'hold': 'Hold',
-  'will call': 'Will Call',
-  'willcall': 'Will Call',
-  'will_call': 'Will Call',
   'cancelled': 'Cancelled',
   'canceled': 'Cancelled',
   'completed': 'Completed',
@@ -543,117 +535,6 @@ function validateAndSanitizeOrders(orders) {
   };
 }
 
-/**
- * Validate a single order for the LITE flow (Connex extension).
- *
- * The browser extension can only reliably scrape order_code, order_date,
- * quantities and status. product_code / customer_name / delivery_address /
- * plant_code are NOT required here (the lite comparison ignores them).
- *
- * @param {object} order - Order object to validate
- * @param {number} rowIndex - Row index for error reporting (1-based)
- * @returns {object} Validation result with isValid, errors, and warnings
- */
-function validateLiteOrder(order, rowIndex) {
-  const errors = [];
-  const warnings = [];
-
-  // Required: order_code
-  if (!order.order_code || String(order.order_code).trim() === '') {
-    errors.push({ row: rowIndex, field: 'order_code', message: 'Order code is required', value: order.order_code });
-  }
-
-  // Required: order_date (must be a valid date — it is half of the match key)
-  if (!order.order_date || String(order.order_date).trim() === '') {
-    errors.push({ row: rowIndex, field: 'order_date', message: 'Order date is required', value: order.order_date });
-  } else if (!validateDateFormat(order.order_date).isValid) {
-    errors.push({ row: rowIndex, field: 'order_date', message: 'Invalid date format. Expected YYYY-MM-DD or MM/DD/YYYY', value: order.order_date });
-  }
-
-  // Quantity is OPTIONAL for the lite flow. Some Connex orders have no y³ chip
-  // (placeholder / non-CY orders); those still match by order_code + order_date,
-  // we just can't quantity-compare them — so warn instead of failing the batch.
-  const hasQty = order.qty !== undefined && order.qty !== null && order.qty !== '';
-  const hasOrderedQty = order.ordered_qty !== undefined && order.ordered_qty !== null && order.ordered_qty !== '';
-  if (!hasQty && !hasOrderedQty) {
-    warnings.push({ row: rowIndex, field: 'qty/ordered_qty', message: 'No quantity provided — quantity will not be compared for this order', value: null });
-  }
-
-  // Optional: status — warn (don't fail) on unknown values
-  if (order.status && !normalizeStatus(order.status)) {
-    warnings.push({ row: rowIndex, field: 'status', message: `Unknown status value. Expected one of: ${VALID_STATUSES.join(', ')}`, value: order.status });
-  }
-
-  return { isValid: errors.length === 0, errors, warnings };
-}
-
-/**
- * Validate and sanitize all orders for the LITE flow.
- * Reuses sanitizeOrder() so the output shape matches the full flow
- * (absent product_code/customer_name become empty strings, which the lite
- * comparison treats as "not compared").
- *
- * @param {array} orders - Array of raw order objects
- * @returns {object} Validation result with sanitized orders
- */
-function validateAndSanitizeLiteOrders(orders) {
-  const allErrors = [];
-  const allWarnings = [];
-  let validCount = 0;
-
-  for (let i = 0; i < orders.length; i++) {
-    const result = validateLiteOrder(orders[i], i + 1);
-    if (result.isValid) validCount++;
-    allErrors.push(...result.errors);
-    allWarnings.push(...result.warnings);
-  }
-
-  if (allErrors.length > 0) {
-    return {
-      isValid: false,
-      errors: allErrors,
-      warnings: allWarnings,
-      validationSummary: {
-        totalRows: orders.length,
-        validRows: validCount,
-        errorCount: allErrors.length,
-        warningCount: allWarnings.length
-      },
-      sanitizedOrders: []
-    };
-  }
-
-  const sanitizedOrders = orders.map((order) => {
-    const s = sanitizeOrder(order);
-    // sanitizeOrder defaults missing quantities to 0; for the lite flow keep them
-    // null so the comparison knows to SKIP qty (vs. treating 0 as a real value).
-    const hasQty = order.qty !== undefined && order.qty !== null && order.qty !== '';
-    const hasOrderedQty = order.ordered_qty !== undefined && order.ordered_qty !== null && order.ordered_qty !== '';
-    if (!hasQty && !hasOrderedQty) {
-      s.ordered_qty = null;
-      s.delivered_qty = null;
-    }
-    return s;
-  });
-
-  const dates = sanitizedOrders.map(o => o.order_date).filter(Boolean).sort();
-  const dateRange = dates.length > 0 ? { from: dates[0], to: dates[dates.length - 1] } : null;
-
-  return {
-    isValid: true,
-    errors: [],
-    warnings: allWarnings,
-    validationSummary: {
-      totalRows: orders.length,
-      validRows: validCount,
-      errorCount: 0,
-      warningCount: allWarnings.length,
-      dateRange
-    },
-    sanitizedOrders
-  };
-}
-
 module.exports = {
   validateRequestPayload,
   validateOrder,
@@ -664,9 +545,7 @@ module.exports = {
   normalizeBoolean,
   parseQuantity,
   sanitizeOrder,
-  validateAndSanitizeOrders,
-  validateLiteOrder,
-  validateAndSanitizeLiteOrders
+  validateAndSanitizeOrders
 };
 
 

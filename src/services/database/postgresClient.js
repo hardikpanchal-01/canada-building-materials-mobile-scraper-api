@@ -8,8 +8,24 @@
 const pg = require('pg');
 const { Pool } = pg;
 
-// Get database URL from environment
-const DATABASE_URL = process.env.DATABASE_URL || process.env.DB_POOL_URL;
+// Get database URL from environment.
+// Strip any `sslmode=...` from the URL: pg-connection-string treats
+// sslmode=require/prefer/verify-ca as verify-full, which would override the
+// `ssl` option below and reject the in-cluster CloudNativePG self-signed cert.
+// We manage TLS ourselves via the `ssl` option instead.
+const RAW_DATABASE_URL = process.env.DATABASE_URL || process.env.DB_POOL_URL;
+let DATABASE_URL = RAW_DATABASE_URL;
+let SSL_DISABLED = false;
+if (RAW_DATABASE_URL) {
+  try {
+    const u = new URL(RAW_DATABASE_URL);
+    SSL_DISABLED = u.searchParams.get('sslmode') === 'disable';
+    u.searchParams.delete('sslmode');
+    DATABASE_URL = u.toString();
+  } catch (e) {
+    DATABASE_URL = RAW_DATABASE_URL;
+  }
+}
 
 // Query timeout configuration (default: 30 seconds)
 const QUERY_TIMEOUT_MS = parseInt(process.env.DB_QUERY_TIMEOUT_MS) || 30000;
@@ -23,20 +39,20 @@ if (DATABASE_URL) {
    *
    * Configuration:
    * - max: Maximum number of connections (20)
-   * - idleTimeoutMillis: Close idle connections after 60s (Postgres pooler closes idle conns; we release first to avoid "Connection terminated unexpectedly")
+   * - idleTimeoutMillis: Close idle connections after 60s (the pooler closes idle conns; we release first to avoid "Connection terminated unexpectedly")
    * - connectionTimeoutMillis: Fail connection attempts after 15 seconds
    */
   pool = new Pool({
     connectionString: DATABASE_URL,
-    min: 2,
-    max: 20,
-    idleTimeoutMillis: 60000,
-    connectionTimeoutMillis: 15000,
+    min: process.env.DISABLE_REALTIME === 'true' ? 0 : 2,
+    max: process.env.DISABLE_REALTIME === 'true' ? 1 : 5,
+    idleTimeoutMillis: process.env.DISABLE_REALTIME === 'true' ? 500 : 60000,
+    connectionTimeoutMillis: process.env.DISABLE_REALTIME === 'true' ? 30000 : 15000,
     statement_timeout: QUERY_TIMEOUT_MS,  // Kill queries exceeding this time
-    // SSL: this tenant's DATABASE_URL is the CNPG NLB host, which connects
-    // without client TLS (the verified live behaviour). If DATABASE_URL is ever
-    // repointed at a TLS-requiring host, enable ssl:{ rejectUnauthorized:false }.
-    ssl: /sslmode=require\b|sslmode=verify-full\b/.test(DATABASE_URL) ? { rejectUnauthorized: false } : false
+    // SSL: accept the server cert without CA verification (the in-cluster
+    // CloudNativePG server presents a self-signed cert; the provider uses its own
+    // chain). Only fully disable TLS when the URL explicitly says sslmode=disable.
+    ssl: SSL_DISABLED ? false : { rejectUnauthorized: false }
   });
 
   // Log pool errors (short message only; full dump is noisy for "Connection terminated unexpectedly")

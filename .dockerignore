@@ -10,8 +10,8 @@ node_modules
 .env
 .env.*
 
-# Committed secrets — defence in depth, do NOT ship into the image.
-# Rotate this key in Firebase and load credentials via FIREBASE_SERVICE_ACCOUNT instead.
+# Firebase service account — required at runtime for FCM push notifications
+# TODO: migrate to FIREBASE_SERVICE_ACCOUNT env var and re-add exclusion
 # src/config/truckast-app-firebase-adminsdk-*.json
 
 # IDE / editor

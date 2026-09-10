@@ -11,10 +11,41 @@
 const { executeAuthSQL } = require('../config/authPostgres');
 const { executeDirectSQL } = require('../utils/postgresExecutor');
 const { createAuthCode, consumeAuthCode, CODE_EXPIRY_SECONDS } = require('./authCodeService');
-const { verifyPassword, secureCompare, decryptTenantSecret } = require('../utils/encryptionUtils');
+const { verifyPassword, secureCompare } = require('../utils/encryptionUtils');
 const { generateAccessToken, generateRefreshToken } = require('../utils/jwtUtils');
 const deviceService = require('./deviceService');
 const { loadUserAccessData } = require('../middleware/auth');
+const { getClientSecretBySubdomain } = require('../config/tenantClients');
+const axios = require('axios');
+
+const AUTH_EXCHANGE_FALLBACK_URL = process.env.AUTH_EXCHANGE_FALLBACK_URL || '';
+
+/**
+ * Fallback: exchange auth code via the central auth API when the local
+ * auth database (port-forwarded) is unavailable.
+ * Returns { user, tenant } on success, null on failure.
+ */
+async function exchangeCodeViaFallback(code, client_secret) {
+  if (!AUTH_EXCHANGE_FALLBACK_URL) return null;
+  try {
+    console.log('[ExchangeCode] Local auth DB unavailable — trying central auth API fallback');
+    const resp = await axios.post(AUTH_EXCHANGE_FALLBACK_URL, { code, client_secret }, { timeout: 10000 });
+    if (resp.data && resp.data.success) {
+      console.log('[ExchangeCode] Central auth API fallback succeeded');
+      return resp.data;
+    }
+    console.error('[ExchangeCode] Fallback returned:', resp.data);
+    return null;
+  } catch (err) {
+    const msg = err.response?.data?.error || err.response?.data?.message || err.message;
+    console.error('[ExchangeCode] Fallback error:', msg);
+    // Forward specific error codes from the central auth API
+    if (err.response?.data?.code) {
+      return { success: false, error_code: err.response.data.code, message: msg };
+    }
+    return null;
+  }
+}
 
 /**
  * Error codes for mobile auth operations
@@ -59,63 +90,41 @@ const ERROR_MESSAGES = {
 };
 
 /**
- * Resolve a tenant's client_secret from the database (single source of truth).
- *
- * `auth_tenant.tenants.client_secret` is stored AES-256-GCM encrypted. This is the
- * exact value the central federated login (`/api/federated-auth/login`) hands back
- * to the client (decrypted), so validating the incoming secret against it — rather
- * than against a hardcoded copy — keeps login and exchange-code in lockstep even
- * when a tenant's secret is rotated.
- *
- * @param {Object} tenant - Tenant row containing the encrypted `client_secret` column
- * @returns {string|null} Decrypted client secret, or null if missing/undecryptable
- */
-function resolveTenantClientSecret(tenant) {
-  if (!tenant || !tenant.client_secret) return null;
-  try {
-    return decryptTenantSecret(tenant.client_secret);
-  } catch (err) {
-    console.error('[MobileAuth] Failed to decrypt tenant client_secret:', err.message);
-    return null;
-  }
-}
-
-/**
- * Get user by email from auth_tenant.users
+ * Get user by email from public.users
  * @param {string} email - User email
  * @returns {Object|null} User record
  */
 async function getUserByEmail(email) {
   const normalizedEmail = email.toLowerCase().trim();
 
-  const result = await executeAuthSQL(
-    'SELECT * FROM users WHERE email = $1 AND deleted_at IS NULL LIMIT 1',
-    [normalizedEmail]
-  );
-
-  if (!result.success || !result.data || result.data.length === 0) {
+  try {
+    const result = await executeAuthSQL(
+      'SELECT * FROM public.users WHERE email = $1 AND deleted_at IS NULL LIMIT 1',
+      [normalizedEmail]
+    );
+    return result.data.length > 0 ? result.data[0] : null;
+  } catch (error) {
+    console.error('[MobileAuth] getUserByEmail SQL error:', error.message);
     return null;
   }
-
-  return result.data[0];
 }
 
 /**
- * Get user by ID from auth_tenant.users
+ * Get user by ID from public.users
  * @param {number} userId - User ID
  * @returns {Object|null} User record
  */
 async function getUserById(userId) {
-  const result = await executeAuthSQL(
-    'SELECT * FROM users WHERE id = $1 AND deleted_at IS NULL LIMIT 1',
-    [userId]
-  );
-
-  if (!result.success || !result.data || result.data.length === 0) {
+  try {
+    const result = await executeAuthSQL(
+      'SELECT * FROM public.users WHERE id = $1 AND deleted_at IS NULL LIMIT 1',
+      [userId]
+    );
+    return result.data.length > 0 ? result.data[0] : null;
+  } catch (error) {
+    console.error('[MobileAuth] getUserById SQL error:', error.message);
     return null;
   }
-
-  return result.data[0];
 }
 
 /**
@@ -125,23 +134,20 @@ async function getUserById(userId) {
  * @returns {Object|null} Tenant user record with tenant details
  */
 async function getTenantUser(userId, tenantId = null) {
-  let sql = 'SELECT * FROM tenant_users WHERE user_id = $1 AND status = $2';
-  const params = [userId, 'active'];
-
-  if (tenantId) {
-    sql += ' AND tenant_id = $3';
-    params.push(tenantId);
-  }
-
-  sql += ' LIMIT 1';
-
-  const result = await executeAuthSQL(sql, params);
-
-  if (!result.success || !result.data || result.data.length === 0) {
+  try {
+    let sql = "SELECT * FROM public.tenant_users WHERE user_id = $1 AND status = 'active'";
+    const params = [userId];
+    if (tenantId) {
+      sql += ' AND tenant_id = $2';
+      params.push(tenantId);
+    }
+    sql += ' LIMIT 1';
+    const result = await executeAuthSQL(sql, params);
+    return result.data.length > 0 ? result.data[0] : null;
+  } catch (error) {
+    console.error('[MobileAuth] getTenantUser SQL error:', error.message);
     return null;
   }
-
-  return result.data[0];
 }
 
 /**
@@ -150,34 +156,32 @@ async function getTenantUser(userId, tenantId = null) {
  * @returns {Object|null} Tenant user record with tenant info
  */
 async function getUserTenantWithDetails(userId) {
-  // Get tenant_user record for this user (active status)
-  const tuResult = await executeAuthSQL(
-    'SELECT * FROM tenant_users WHERE user_id = $1 AND status = $2 LIMIT 1',
-    [userId, 'active']
-  );
+  try {
+    const tuResult = await executeAuthSQL(
+      "SELECT * FROM public.tenant_users WHERE user_id = $1 AND status = 'active' LIMIT 1",
+      [userId]
+    );
+    if (tuResult.data.length === 0) {
+      return null;
+    }
+    const tenantUser = tuResult.data[0];
 
-  if (!tuResult.success || !tuResult.data || tuResult.data.length === 0) {
+    const tResult = await executeAuthSQL(
+      `SELECT id, uuid, name, subdomain, redirect_url, client_id, status, settings, backend_url,
+              qr_enabled, qr_mode, qr_user_active, timezone
+       FROM public.tenants
+       WHERE id = $1 AND deleted_at IS NULL LIMIT 1`,
+      [tenantUser.tenant_id]
+    );
+    if (tResult.data.length === 0) {
+      return null;
+    }
+
+    return { tenantUser, tenant: tResult.data[0] };
+  } catch (error) {
+    console.error('[MobileAuth] getUserTenantWithDetails SQL error:', error.message);
     return null;
   }
-
-  const tenantUser = tuResult.data[0];
-
-  // Get tenant details
-  const tResult = await executeAuthSQL(
-    'SELECT id, uuid, name, subdomain, redirect_url, client_id, client_secret, status, settings, backend_url, qr_enabled, qr_mode, qr_user_active, timezone FROM tenants WHERE id = $1 AND deleted_at IS NULL LIMIT 1',
-    [tenantUser.tenant_id]
-  );
-
-  if (!tResult.success || !tResult.data || tResult.data.length === 0) {
-    return null;
-  }
-
-  const tenant = tResult.data[0];
-
-  return {
-    tenantUser,
-    tenant
-  };
 }
 
 /**
@@ -187,7 +191,8 @@ async function getUserTenantWithDetails(userId) {
 async function recordLoginAttempt({ email, userId, tenantId, success, failureReason, ipAddress, userAgent }) {
   try {
     await executeAuthSQL(
-      `INSERT INTO login_attempts (email, user_id, tenant_id, success, failure_reason, ip_address, user_agent)
+      `INSERT INTO public.login_attempts
+         (email, user_id, tenant_id, success, failure_reason, ip_address, user_agent)
        VALUES ($1, $2, $3, $4, $5, $6, $7)`,
       [
         email?.toLowerCase()?.trim(),
@@ -212,8 +217,8 @@ async function recordLoginAttempt({ email, userId, tenantId, success, failureRea
 async function updateLastLogin(userId) {
   try {
     await executeAuthSQL(
-      'UPDATE users SET last_login_at = $1 WHERE id = $2',
-      [new Date().toISOString(), userId]
+      'UPDATE public.users SET last_login_at = NOW() WHERE id = $1',
+      [userId]
     );
   } catch (error) {
     console.error('Failed to update last login:', error);
@@ -359,7 +364,7 @@ async function authenticateAndGenerateCode({ email, password, metadata = {} }) {
     ]).catch(() => {});
 
     // Step 9: Return success with code, redirect URL, and client_secret for exchange
-    const clientSecret = resolveTenantClientSecret(tenant);
+    const clientSecret = getClientSecretBySubdomain(tenant.subdomain);
 
     return {
       success: true,
@@ -370,7 +375,8 @@ async function authenticateAndGenerateCode({ email, password, metadata = {} }) {
       tenant: {
         id: tenant.id,
         name: tenant.name,
-        subdomain: tenant.subdomain
+        subdomain: tenant.subdomain,
+        backend_url: tenant.backend_url || null
       }
     };
 
@@ -421,82 +427,144 @@ async function exchangeCodeForUserInfo({ code, client_secret, device_info }) {
     const { getAuthCode } = require('./authCodeService');
     const authCode = await getAuthCode(code);
 
+    let tenant, user, tenantUser;
+
     if (!authCode) {
-      return {
-        success: false,
-        error_code: ERROR_CODES.INVALID_CODE,
-        message: ERROR_MESSAGES.INVALID_CODE
+      // Local auth DB may be unavailable — try central auth API fallback
+      const fallback = await exchangeCodeViaFallback(code, client_secret);
+
+      if (!fallback) {
+        return {
+          success: false,
+          error_code: ERROR_CODES.INVALID_CODE,
+          message: ERROR_MESSAGES.INVALID_CODE
+        };
+      }
+      // Forward error codes from the central auth API (e.g. CODE_EXPIRED, INVALID_CLIENT)
+      if (!fallback.success) {
+        return {
+          success: false,
+          error_code: fallback.error_code || ERROR_CODES.INVALID_CODE,
+          message: fallback.message || ERROR_MESSAGES.INVALID_CODE
+        };
+      }
+
+      // Reconstruct tenant & user from fallback response (code already consumed by central auth)
+      tenant = {
+        id: fallback.tenant.tenant_id,
+        uuid: fallback.tenant.uuid,
+        name: fallback.tenant.name,
+        subdomain: fallback.tenant.subdomain,
+        status: 'active',
+        redirect_url: fallback.tenant.redirect_url || null,
+        client_id: fallback.tenant.client_id || null,
+        backend_url: fallback.tenant.backend_url || null,
+        qr_enabled: false,
+        qr_mode: 'encrypted',
+        qr_user_active: false,
       };
+      user = {
+        id: fallback.user.id,
+        uuid: fallback.user.uuid,
+        email: fallback.user.email,
+        full_name: fallback.user.full_name || null,
+        phone_number: null,
+        phone_country_code: null,
+        title: null,
+        avatar_url: null,
+        user_role: null,
+        active: true,
+      };
+      tenantUser = { role: 'member', status: 'active' };
+
+      // Enrich user data from tenant DB (has more profile fields than central auth API)
+      try {
+        const localUser = await executeDirectSQL(
+          "SELECT id, email, full_name, phone, avatar_url, role FROM users WHERE email = $1 LIMIT 1",
+          [user.email]
+        );
+        if (localUser.data.length > 0) {
+          const lu = localUser.data[0];
+          user.uuid = lu.id || user.uuid;
+          user.full_name = lu.full_name || user.full_name;
+          user.phone_number = lu.phone || user.phone_number;
+          user.avatar_url = lu.avatar_url || user.avatar_url;
+          user.user_role = lu.role || user.user_role;
+          console.log(`[ExchangeCode] Enriched user data from tenant DB`);
+        }
+      } catch (_) {}
+
+      console.log(`[ExchangeCode] Fallback resolved user=${user.email} tenant=${tenant.subdomain}`);
+    } else {
+      // Normal flow: local auth DB is available
+
+      // Step 2: Get tenant from auth code's tenant_id
+      const { getTenantById } = require('./tenantService');
+      tenant = await getTenantById(authCode.tenant_id);
+
+      if (!tenant) {
+        return {
+          success: false,
+          error_code: ERROR_CODES.NO_TENANT,
+          message: ERROR_MESSAGES.NO_TENANT
+        };
+      }
+
+      if (tenant.status !== 'active') {
+        return {
+          success: false,
+          error_code: ERROR_CODES.TENANT_SUSPENDED,
+          message: ERROR_MESSAGES.TENANT_SUSPENDED
+        };
+      }
+
+      // Step 3: Validate client_secret against tenant config
+      const expectedSecret = getClientSecretBySubdomain(tenant.subdomain);
+
+      if (!expectedSecret) {
+        return {
+          success: false,
+          error_code: ERROR_CODES.INVALID_CLIENT,
+          message: ERROR_MESSAGES.INVALID_CLIENT
+        };
+      }
+
+      if (!secureCompare(client_secret, expectedSecret)) {
+        return {
+          success: false,
+          error_code: ERROR_CODES.INVALID_CLIENT,
+          message: ERROR_MESSAGES.INVALID_CLIENT
+        };
+      }
+
+      // Step 4: Validate and consume authorization code
+      const { valid: codeValid, user_id, email, error: codeError } = await consumeAuthCode(code, tenant.id);
+
+      if (!codeValid) {
+        return {
+          success: false,
+          error_code: codeError,
+          message: ERROR_MESSAGES[codeError] || 'Invalid authorization code'
+        };
+      }
+
+      // Step 5: Fetch user information
+      user = await getUserById(user_id);
+
+      if (!user) {
+        return {
+          success: false,
+          error_code: ERROR_CODES.USER_NOT_FOUND,
+          message: ERROR_MESSAGES.USER_NOT_FOUND
+        };
+      }
+
+      // Step 6a: Get tenant_user role
+      tenantUser = await getTenantUser(user_id, tenant.id);
     }
 
-    // Step 2: Get tenant from auth code's tenant_id (with decrypted client_secret)
-    const { getTenantById, getTenantByClientId } = require('./tenantService');
-    const tenant = await getTenantById(authCode.tenant_id);
-
-    if (!tenant) {
-      return {
-        success: false,
-        error_code: ERROR_CODES.NO_TENANT,
-        message: ERROR_MESSAGES.NO_TENANT
-      };
-    }
-
-    if (tenant.status !== 'active') {
-      return {
-        success: false,
-        error_code: ERROR_CODES.TENANT_SUSPENDED,
-        message: ERROR_MESSAGES.TENANT_SUSPENDED
-      };
-    }
-
-    // Step 3: Validate client_secret against the tenant's own secret stored in the DB.
-    // This is the same (decrypted) value the federated login hands to the client, so
-    // rotating a tenant's secret never desyncs login from exchange-code.
-    const expectedSecret = resolveTenantClientSecret(tenant);
-
-    if (!expectedSecret) {
-      return {
-        success: false,
-        error_code: ERROR_CODES.INVALID_CLIENT,
-        message: ERROR_MESSAGES.INVALID_CLIENT
-      };
-    }
-
-    if (!secureCompare(client_secret, expectedSecret)) {
-      return {
-        success: false,
-        error_code: ERROR_CODES.INVALID_CLIENT,
-        message: ERROR_MESSAGES.INVALID_CLIENT
-      };
-    }
-
-    // Step 4: Validate and consume authorization code
-    const { valid: codeValid, user_id, email, error: codeError } = await consumeAuthCode(code, tenant.id);
-
-    if (!codeValid) {
-      return {
-        success: false,
-        error_code: codeError,
-        message: ERROR_MESSAGES[codeError] || 'Invalid authorization code'
-      };
-    }
-
-    // Step 5: Fetch user information
-    const user = await getUserById(user_id);
-
-    if (!user) {
-      return {
-        success: false,
-        error_code: ERROR_CODES.USER_NOT_FOUND,
-        message: ERROR_MESSAGES.USER_NOT_FOUND
-      };
-    }
-
-    // Step 6: Get tenant_user role and load user access data (userType, userRole)
-    const [tenantUser, accessData] = await Promise.all([
-      getTenantUser(user_id, tenant.id),
-      loadUserAccessData(user.uuid, user.email)
-    ]);
+    // Step 6b: Load user access data from tenant DB
+    const accessData = await loadUserAccessData(user.uuid, user.email);
 
     // Step 7: Build user object for JWT token generation
     const userForToken = {
@@ -508,25 +576,21 @@ async function exchangeCodeForUserInfo({ code, client_secret, device_info }) {
       userRole: accessData.userRole || null
     };
 
-    // Step 8: Register/update device if device info is provided (SAME AS /api/auth/login)
-    // user_devices.user_id FKs to the tenant's public.users(id), which mirrors
-    // the tenant's auth.users.id — NOT the central auth_tenant.users.uuid we
-    // hold in `user.uuid`. Resolve the tenant-side user id by email; skip
-    // device registration if no tenant user row exists for this email.
+    // Step 8: Register/update device if device info is provided
+    // Resolve the local user ID (tenant DB) since user_devices FK references the local users table.
+    // The central auth UUID may differ from the local one.
     if (device_info) {
       try {
-        const tenantUserResult = await executeDirectSQL(
-          "SELECT id FROM users WHERE email = $1 LIMIT 1",
-          [user.email.toLowerCase().trim()]
-        );
-
-        if (!tenantUserResult.data || tenantUserResult.data.length === 0) {
-          console.warn(`⚠️  No tenant user row found for ${user.email}; skipping device registration`);
-        } else {
-          await deviceService.registerOrUpdateDevice(tenantUserResult.data[0].id, device_info);
-        }
+        let localUserId = user.uuid;
+        try {
+          const localUser = await executeDirectSQL(
+            "SELECT id FROM users WHERE email = $1 LIMIT 1",
+            [user.email]
+          );
+          if (localUser.data.length > 0) localUserId = localUser.data[0].id;
+        } catch (_) {}
+        await deviceService.registerOrUpdateDevice(localUserId, device_info);
       } catch (deviceError) {
-        // Log device registration error but don't fail login (same behavior as /api/auth/login)
         console.error('⚠️  Device registration failed during exchange-code:', deviceError.message);
       }
     }
@@ -552,7 +616,6 @@ async function exchangeCodeForUserInfo({ code, client_secret, device_info }) {
             `SELECT ${TZ_COLUMNS} FROM timezones WHERE iana_code = $1 LIMIT 1`,
             [ianaCode]
           );
-
           if (companyTzResult.data.length > 0) {
             companyTimezone = companyTzResult.data[0];
           }
@@ -633,10 +696,7 @@ async function exchangeCodeForUserInfo({ code, client_secret, device_info }) {
             tenant_subdomain: tenant.subdomain,
             tenant_redirect_url: tenant.redirect_url,
             tenant_client_id: tenant.client_id,
-            // Fall back to the per-tenant API host when backend_url is unset in the
-            // DB — matches the admin federated-login behavior so the mobile app
-            // never receives a null backend_url (which crashes normalizeBackendUrl).
-            tenant_backend_url: tenant.backend_url || `https://${tenant.subdomain}-api.truckast.ai`,
+            tenant_backend_url: tenant.backend_url || null,
             qr_enabled: tenant.qr_enabled ?? false,
             qr_mode: tenant.qr_mode || 'encrypted',
             qr_user_active: tenant.qr_user_active ?? false
@@ -667,53 +727,23 @@ async function exchangeCodeForUserInfo({ code, client_secret, device_info }) {
  */
 async function getUserTenants(userId) {
   try {
-    // Get all active tenant_user records for this user
-    const tuResult = await executeAuthSQL(
-      'SELECT tenant_id FROM tenant_users WHERE user_id = $1 AND status = $2',
-      [userId, 'active']
+    const result = await executeAuthSQL(
+      `SELECT t.id, t.uuid, t.name, t.subdomain, t.backend_url, t.image_url
+       FROM public.tenant_users tu
+       JOIN public.tenants t ON t.id = tu.tenant_id
+       WHERE tu.user_id = $1 AND tu.status = 'active'
+         AND t.deleted_at IS NULL AND t.status = 'active'
+       ORDER BY t.name ASC`,
+      [userId]
     );
-
-    if (!tuResult.success) {
-      console.error('[MobileAuth] Error fetching tenant_users:', tuResult.error);
-      return { success: false, error_code: ERROR_CODES.SERVER_ERROR, message: ERROR_MESSAGES.SERVER_ERROR };
-    }
-
-    if (!tuResult.data || tuResult.data.length === 0) {
-      return { success: true, data: [] };
-    }
-
-    const tenantIds = tuResult.data.map(tu => tu.tenant_id);
-
-    // Build parameterized IN clause: $1, $2, $3, ...
-    const placeholders = tenantIds.map((_, i) => `$${i + 1}`).join(', ');
-    const params = [...tenantIds];
-    const statusIdx = params.length + 1;
-    params.push('active');
-
-    // Get tenant details for all matching tenants
-    const tResult = await executeAuthSQL(
-      `SELECT id, uuid, name, subdomain, backend_url, status, image_url
-       FROM tenants
-       WHERE id IN (${placeholders})
-         AND deleted_at IS NULL
-         AND status = $${statusIdx}
-       ORDER BY name ASC`,
-      params
-    );
-
-    if (!tResult.success) {
-      console.error('[MobileAuth] Error fetching tenants:', tResult.error);
-      return { success: false, error_code: ERROR_CODES.SERVER_ERROR, message: ERROR_MESSAGES.SERVER_ERROR };
-    }
-
     return {
       success: true,
-      data: (tResult.data || []).map(t => ({
+      data: result.data.map(t => ({
         id: t.id,
         uuid: t.uuid,
         name: t.name,
         subdomain: t.subdomain,
-        backend_url: t.backend_url || `https://${t.subdomain}-api.truckast.ai`,
+        backend_url: t.backend_url || null,
         image_url: t.image_url || null
       }))
     };
@@ -735,16 +765,16 @@ async function getUserTenants(userId) {
  */
 async function generateSwitchCode({ userId, email, targetSubdomain }) {
   try {
-    // Step 1: Look up target tenant by subdomain
     const tResult = await executeAuthSQL(
-      'SELECT id, uuid, name, subdomain, redirect_url, client_id, client_secret, status, backend_url, qr_enabled, qr_mode, qr_user_active FROM tenants WHERE subdomain = $1 AND deleted_at IS NULL LIMIT 1',
+      `SELECT id, uuid, name, subdomain, redirect_url, client_id, status, backend_url,
+              qr_enabled, qr_mode, qr_user_active
+       FROM public.tenants
+       WHERE subdomain = $1 AND deleted_at IS NULL LIMIT 1`,
       [targetSubdomain.toLowerCase().trim()]
     );
-
-    if (!tResult.success || !tResult.data || tResult.data.length === 0) {
+    if (tResult.data.length === 0) {
       return { success: false, error_code: ERROR_CODES.NO_TENANT, message: ERROR_MESSAGES.NO_TENANT };
     }
-
     const tenant = tResult.data[0];
 
     if (tenant.status !== 'active') {
@@ -766,7 +796,7 @@ async function generateSwitchCode({ userId, email, targetSubdomain }) {
     });
 
     // Step 4: Get client secret for the target tenant
-    const clientSecret = resolveTenantClientSecret(tenant);
+    const clientSecret = getClientSecretBySubdomain(tenant.subdomain);
 
     return {
       success: true,
@@ -777,7 +807,7 @@ async function generateSwitchCode({ userId, email, targetSubdomain }) {
         id: tenant.id,
         name: tenant.name,
         subdomain: tenant.subdomain,
-        backend_url: tenant.backend_url || `https://${tenant.subdomain}-api.truckast.ai`
+        backend_url: tenant.backend_url || null
       }
     };
   } catch (error) {

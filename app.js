@@ -49,54 +49,32 @@ app.use((req, res, next) => {
 // Swagger Documentation
 // =============================================================================
 
-// Helper to create spec with dynamic server URL based on request protocol.
-// This prevents mixed-content errors when Swagger UI is accessed over HTTPS
-// but the static spec has an HTTP server URL.
-// Resolution order: API_BASE_URL env var → X-Forwarded-Proto header →
-// forced HTTPS for any non-localhost host → req.protocol fallback.
-const resolveServerUrl = (req) => {
-  if (process.env.API_BASE_URL) return process.env.API_BASE_URL;
-
-  const host = req.get('host') || 'localhost';
-  const isLocal = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i.test(host);
-
-  const fwd = req.get('x-forwarded-proto');
-  let protocol;
-  if (fwd) {
-    protocol = fwd.split(',')[0].trim();
-  } else if (!isLocal) {
-    protocol = 'https';
-  } else {
-    protocol = req.protocol;
-  }
-
-  return `${protocol}://${host}`;
-};
-
-const createDynamicSpec = (baseSpec, req) => ({
+// Helper to create spec with a RELATIVE server URL so Swagger UI "Try it out"
+// always targets the same origin (and scheme) the docs page is served from.
+// Using an absolute `${req.protocol}://...` breaks behind a TLS-terminating proxy
+// (Cloudflare/ALB): the pod receives the request over HTTP internally, so
+// req.protocol is "http", producing an http:// URL that an HTTPS docs page is
+// blocked from calling (mixed content → "Failed to fetch"). A relative "/" is
+// resolved by the browser against the current page origin, so it is correct over
+// http locally and https in every proxied environment.
+const createDynamicSpec = (baseSpec, _req) => ({
   ...baseSpec,
   servers: [
     {
-      url: resolveServerUrl(req),
+      url: '/',
       description: process.env.NODE_ENV === 'production' ? 'Production Server' : 'Development Server'
     }
   ]
 });
 
-// Middleware to set req.swaggerDoc dynamically (swagger-ui-express checks this)
+// Middleware to set req.swaggerDoc dynamically (swagger-ui-express checks this).
+// Also mark the docs (HTML + swagger-ui-init.js + spec) as non-cacheable so a CDN
+// like Cloudflare does not serve a stale docs bundle after a deploy.
 const dynamicSwaggerDoc = (baseSpec) => (req, res, next) => {
+  res.set('Cache-Control', 'no-store, must-revalidate');
   req.swaggerDoc = createDynamicSpec(baseSpec, req);
   next();
 };
-
-// Never let a CDN/proxy (e.g. Cloudflare) cache the Swagger UI bootstrap or the
-// dynamic spec — a cached http server URL breaks "Try it out" over HTTPS.
-app.use(['/scraper-api-docs', '/mobile-api-docs', '/scraper-api-docs.json', '/mobile-api-docs.json'], (req, res, next) => {
-  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-  res.setHeader('Pragma', 'no-cache');
-  res.setHeader('Expires', '0');
-  next();
-});
 
 // Create separate routers for each swagger docs to avoid serve middleware conflicts
 const scraperDocsRouter = express.Router();
@@ -155,7 +133,7 @@ app.get('/.well-known/assetlinks.json', (req, res) => {
 // Serve public PDF documents (NRMCA CIP guides) for mobile clients
 app.use('/pdfs', express.static(path.join(__dirname, 'public', 'pdfs')));
 
-// Serve uploaded chat files (images, audio)
+// Serve local uploads (avatars, scraped-orders) in development when S3 is not configured
 app.use('/uploads', express.static(path.join(__dirname, 'public', 'uploads')));
 
 // Explicit PDF endpoint as fallback (in case express.static fails on deployed server)
@@ -190,7 +168,6 @@ app.use('/api/auth', require('./src/routes/authRoutes'));
 app.use('/api/users', require('./src/routes/userRoutes'));
 app.use('/api/notifications', require('./src/routes/notificationRoutes'));
 app.use('/api/orders', require('./src/routes/orderRoutes'));
-app.use('/api/dashboard', require('./src/routes/dashboardRoutes'));
 app.use('/api/new-dashboard', require('./src/routes/newDashboardRoutes'));
 app.use('/api', require('./src/routes/scrapedOrderRoutes'));
 app.use('/api/queue', require('./src/routes/queueRoutes'));
@@ -203,12 +180,20 @@ app.use('/api/email-templates', require('./src/routes/emailTemplateRoutes'));
 app.use('/api/ai', require('./src/routes/nlqRoutes'));
 app.use('/api/ai', require('./src/routes/aiAssistantRoutes'));
 app.use('/api/chat', require('./src/routes/chatRoutes'));
-app.use('/api/qr', require('./src/routes/qrRoutes'));
 app.use('/api/daily-intelligence', require('./src/routes/dailyIntelligenceRoutes'));
+
+// QR Code Verification (server-side decrypt + lookup)
+app.use('/api/qr', require('./src/routes/qrRoutes'));
 
 // Mobile Federated Authentication Routes
 app.use('/api/auth/mobile', require('./src/routes/mobileAuthRoutes'));
+
+// Federated auth alias — lets the mobile app use this backend as FEDERATED_AUTH_URL
+// so auth codes are created and exchanged against the same database.
+app.post('/api/federated-auth/login', require('./src/controllers/mobileAuthController').login);
 app.use('/api/tenant', require('./src/routes/tenantRoutes'));
+
+// Scan History (mobile QR scanner)
 app.use('/api/scan-history', require('./src/routes/scanHistoryRoutes'));
 
 // User Preferences (private)
@@ -217,6 +202,7 @@ app.use('/api/user-preferences', require('./src/routes/userPreferenceRoutes'));
 // Timezones (public, no auth)
 app.use('/api/timezones', require('./src/routes/timezoneRoutes'));
 
+// Short URL Resolution (public, no auth)
 app.use('/api/short-urls', require('./src/routes/shortUrlRoutes'));
 
 // Root route
@@ -237,12 +223,9 @@ app.get('/', (req, res) => {
           logout: 'POST /api/auth/logout',
           refresh: 'POST /api/auth/refresh',
           me: 'GET /api/auth/me',
-          appPermissions: 'GET /api/auth/app-permissions',
           federated: {
             login: 'POST /api/auth/mobile/login (email, password - tenant auto-detected)',
-            exchangeCode: 'POST /api/auth/mobile/exchange-code',
-            tenants: 'GET /api/auth/mobile/tenants',
-            switchTenant: 'POST /api/auth/mobile/switch-tenant'
+            exchangeCode: 'POST /api/auth/mobile/exchange-code'
           }
         },
         tenant: {
@@ -253,12 +236,11 @@ app.get('/', (req, res) => {
           updateProfile: 'PUT /api/users/profile'
         },
         dashboard: {
-          home: 'GET /api/dashboard'
+          home: 'GET /api/new-dashboard'
         },
         notifications: {
           send: 'POST /api/notifications/send',
           fcm: 'POST /api/notifications/fcm',
-          sendOrder: 'POST /api/notifications/send-order',
           history: 'GET /api/notifications/history?user_id={user_id}&tenant_id={tenant_id}&page={page}&limit={limit}'
         },
         tickets: {
@@ -272,57 +254,28 @@ app.get('/', (req, res) => {
         orders: {
           list: 'GET /api/orders',
           details: 'GET /api/orders/details?order_code={order_code}&order_date={order_date}',
-          scheduledLoads: 'GET /api/orders/scheduled-loads?order_code={order_code}&order_date={order_date}',
           summary: 'GET /api/orders/summary',
           favourites: 'GET /api/orders/favourites',
           toggleFavourite: 'POST /api/orders/{order_id}/favourite'
         },
         orderRequests: {
           list: 'GET /api/order-requests',
+          detail: 'GET /api/order-requests/:id',
           create: 'POST /api/order-requests',
-          getById: 'GET /api/order-requests/{id}',
-          update: 'PUT /api/order-requests/{id}',
-          updateStatus: 'PATCH /api/order-requests/{id}/status',
-          updateVerification: 'PATCH /api/order-requests/{id}/verification',
+          update: 'PUT /api/order-requests/:id',
+          updateStatus: 'PATCH /api/order-requests/:id/status',
+          updateVerification: 'PATCH /api/order-requests/:id/verification',
+          messages: 'GET /api/order-requests/:id/messages',
+          sendMessage: 'POST /api/order-requests/:id/messages',
           formData: 'GET /api/order-requests/form-data',
           searchOrders: 'GET /api/order-requests/search-orders',
-          searchProducts: 'GET /api/order-requests/search-products',
-          ordersByProject: 'GET /api/order-requests/orders-by-project?projectCode={code}',
-          recentEntities: 'GET /api/order-requests/recent-entities',
-          messages: 'GET /api/order-requests/{id}/messages',
-          sendMessage: 'POST /api/order-requests/{id}/messages'
+          searchProducts: 'GET /api/order-requests/search-products'
         },
         weather: {
           all: 'GET /api/weather/all'
         },
-        qr: {
-          verify: 'POST /api/qr/verify'
-        },
-        scanHistory: {
-          list: 'GET /api/scan-history',
-          save: 'POST /api/scan-history',
-          delete: 'DELETE /api/scan-history/{id}',
-          clear: 'DELETE /api/scan-history'
-        },
-        chat: {
-          readStatus: 'GET /api/chat/read-status',
-          unreadCounts: 'GET /api/chat/unread-counts',
-          markRead: 'POST /api/chat/mark-read'
-        },
-        emailTemplates: {
-          list: 'GET /api/email-templates',
-          defaults: 'GET /api/email-templates/defaults',
-          create: 'POST /api/email-templates',
-          update: 'PUT /api/email-templates/{id}',
-          delete: 'DELETE /api/email-templates/{id}'
-        },
-        ai: {
-          chat: 'POST /api/ai/chat',
-          history: 'GET /api/ai/history/{sessionId}',
-          clearHistory: 'DELETE /api/ai/history/{sessionId}'
-        },
         shortUrls: {
-          resolve: 'GET /api/short-urls/resolve/{code}'
+          resolve: 'GET /api/short-urls/resolve/:code'
         }
       },
       scraper: {
@@ -334,6 +287,11 @@ app.get('/', (req, res) => {
         process: 'POST /api/queue/process',
         stats: 'GET /api/queue/stats',
         status: 'GET /api/queue/status/:batchId'
+      },
+      ai: {
+        chat: 'POST /api/ai/chat',
+        history: 'GET /api/ai/history/:sessionId',
+        clearHistory: 'DELETE /api/ai/history/:sessionId'
       }
     }
   });

@@ -13,19 +13,8 @@ const { executeDirectSQL } = require('../utils/postgresExecutor');
 async function getNotifications(userId, tenantId, page = 1, limit = 50) {
   const offset = (page - 1) * limit;
 
-  // Resolve both the central-auth ID and the tenant-local ID so notifications
-  // stored under either UUID are returned.
-  const userIds = [userId];
-  try {
-    const mapped = await executeDirectSQL(
-      `SELECT id::text FROM users WHERE email = (SELECT email FROM auth.users WHERE id = $1::uuid) AND id::text <> $1::text LIMIT 1`,
-      [userId]
-    );
-    if (mapped.data?.[0]?.id) userIds.push(mapped.data[0].id);
-  } catch (_) {}
-
-  const countParams = [userIds];
-  let countWhere = 'WHERE user_id::text = ANY($1)';
+  const countParams = [userId];
+  let countWhere = 'WHERE user_id = $1';
   if (tenantId) {
     countParams.push(tenantId);
     countWhere += ` AND tenant_id = $${countParams.length}`;

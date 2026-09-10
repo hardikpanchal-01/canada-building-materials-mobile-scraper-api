@@ -15,23 +15,22 @@ const { executeAuthSQL } = require('../config/authPostgres');
  * @returns {Object} { success, data, error, error_code }
  */
 async function resolveShortUrl(code) {
-  // Look up the short URL record
-  const result = await executeAuthSQL(
-    'SELECT id, code, tenant_slug, original_url, expires_at, click_count FROM short_urls WHERE code = $1 LIMIT 1',
-    [code]
-  );
-
-  if (!result.success) {
-    console.error('[ShortUrl] Database error:', result.error);
+  let record;
+  try {
+    const result = await executeAuthSQL(
+      `SELECT id, code, tenant_slug, original_url, expires_at, click_count
+         FROM public.short_urls WHERE code = $1 LIMIT 1`,
+      [code]
+    );
+    if (result.data.length === 0) {
+      console.warn('[ShortUrl] Code not found:', code);
+      return { success: false, data: null, error: 'Short URL not found', error_code: 'NOT_FOUND' };
+    }
+    record = result.data[0];
+  } catch (fetchError) {
+    console.error('[ShortUrl] Database error:', fetchError.message);
     return { success: false, data: null, error: 'Failed to resolve short URL', error_code: 'DB_ERROR' };
   }
-
-  if (!result.data || result.data.length === 0) {
-    console.warn('[ShortUrl] Code not found:', code);
-    return { success: false, data: null, error: 'Short URL not found', error_code: 'NOT_FOUND' };
-  }
-
-  const record = result.data[0];
 
   // Check expiry if expires_at is set
   if (record.expires_at) {
@@ -44,10 +43,12 @@ async function resolveShortUrl(code) {
 
   // Increment click_count atomically and update last_accessed_at (fire-and-forget)
   executeAuthSQL(
-    'UPDATE short_urls SET click_count = click_count + 1, last_accessed_at = NOW() WHERE id = $1',
+    `UPDATE public.short_urls
+       SET click_count = COALESCE(click_count, 0) + 1, last_accessed_at = NOW()
+       WHERE id = $1`,
     [record.id]
-  ).catch((err) => {
-    console.error('[ShortUrl] Click increment failed:', err.message);
+  ).catch((updateError) => {
+    console.error('[ShortUrl] Click increment failed:', updateError.message);
   });
 
   return {

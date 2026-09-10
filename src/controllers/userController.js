@@ -322,7 +322,7 @@ async function updateProfile(req, res) {
  *     summary: Upload profile picture
  *     description: |
  *       Uploads a profile picture for the authenticated user.
- *       The image is stored in a Postgres Storage bucket and the public URL
+ *       The image is stored in an S3 bucket and the public URL
  *       is saved to the user's `avatar_url` column.
  *
  *       **Accepted formats:** JPEG, PNG, GIF, WebP
@@ -394,7 +394,7 @@ async function uploadAvatar(req, res) {
       req.file.buffer,
       req.file.mimetype,
       req.file.originalname,
-      req.user.email
+      req.user?.email
     );
 
     return res.status(200).json({
@@ -458,7 +458,7 @@ async function removeAvatar(req, res) {
     }
 
     const tz = req.user?.timezone || null;
-    const updatedProfile = await userService.removeUserAvatar(userId, req.user.email);
+    const updatedProfile = await userService.removeUserAvatar(userId);
 
     return res.status(200).json({
       success: true,

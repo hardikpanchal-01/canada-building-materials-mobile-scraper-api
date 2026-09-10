@@ -12,81 +12,38 @@
 
 const { executeDirectSQL } = require('../utils/postgresExecutor');
 
-// In-memory caches for exclusion patterns (5-minute TTL)
-// Separate caches for the full pattern set (display) and the counts-only subset
-// so count-aggregation endpoints mirror the web frontend behavior.
-let _cachedDisplayPatterns = null;
-let _cachedCountsPatterns = null;
-let _cacheDisplayTimestamp = 0;
-let _cacheCountsTimestamp = 0;
-const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+// In-memory cache for the active exclusion patterns (5-minute TTL).
+let _cachedPatterns = null;
+let _cacheTimestamp = 0;
+const CACHE_TTL_MS = 5 * 60 * 1000;
 
-/**
- * Fetch active exclusion patterns from database (cached with 5-minute TTL).
- *
- * @param {object} [opts]
- * @param {boolean} [opts.affectsCountsOnly] - When true, only return patterns
- *   flagged affects_counts=true (subset used by summary/count aggregation so
- *   counts mirror the source operational system). When false/omitted, returns
- *   the full pattern set used to hide orders from list/table views.
- *
- *   Gracefully falls back to the full set if the affects_counts column is
- *   missing (matches web frontend fallback behavior).
- * @returns {Promise<array>} Array of active patterns
- */
-async function fetchExclusionPatterns(opts = {}) {
-  const affectsCountsOnly = opts.affectsCountsOnly === true;
+// Match web RPC get_orders_summary post-2026-05-11: load every active pattern,
+// ignoring the affects_counts flag. List views and count endpoints share the
+// same source set so mobile and web stay aligned.
+async function fetchExclusionPatterns() {
   const now = Date.now();
-
-  if (affectsCountsOnly) {
-    if (_cachedCountsPatterns !== null && (now - _cacheCountsTimestamp) < CACHE_TTL_MS) {
-      return _cachedCountsPatterns;
-    }
-  } else {
-    if (_cachedDisplayPatterns !== null && (now - _cacheDisplayTimestamp) < CACHE_TTL_MS) {
-      return _cachedDisplayPatterns;
-    }
+  if (_cachedPatterns !== null && (now - _cacheTimestamp) < CACHE_TTL_MS) {
+    return _cachedPatterns;
   }
 
-  const countsSql = `
-    SELECT type, pattern
-    FROM excluded_order_patterns
-    WHERE active = true AND affects_counts = true
-  `;
-  const displaySql = `
+  const sql = `
     SELECT type, pattern
     FROM excluded_order_patterns
     WHERE active = true
   `;
 
   try {
-    let result = await executeDirectSQL(affectsCountsOnly ? countsSql : displaySql, []);
-
-    // Graceful fallback if the affects_counts column hasn't been migrated yet
-    if (affectsCountsOnly && !result.success &&
-        /affects_counts/i.test(String(result.error || ''))) {
-      console.warn('[fetchExclusionPatterns] affects_counts column missing — falling back to full pattern set');
-      result = await executeDirectSQL(displaySql, []);
-    }
-
+    const result = await executeDirectSQL(sql, []);
     if (!result.success) {
       console.error('Failed to fetch exclusion patterns:', result.error);
-      return (affectsCountsOnly ? _cachedCountsPatterns : _cachedDisplayPatterns) || [];
+      return _cachedPatterns || [];
     }
-
-    const patterns = result.data || [];
-    if (affectsCountsOnly) {
-      _cachedCountsPatterns = patterns;
-      _cacheCountsTimestamp = now;
-    } else {
-      _cachedDisplayPatterns = patterns;
-      _cacheDisplayTimestamp = now;
-    }
-
-    return patterns;
+    _cachedPatterns = result.data || [];
+    _cacheTimestamp = now;
+    return _cachedPatterns;
   } catch (error) {
     console.error('Error fetching exclusion patterns:', error.message);
-    return (affectsCountsOnly ? _cachedCountsPatterns : _cachedDisplayPatterns) || [];
+    return _cachedPatterns || [];
   }
 }
 

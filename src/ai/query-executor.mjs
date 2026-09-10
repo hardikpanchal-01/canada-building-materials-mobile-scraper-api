@@ -1,4 +1,4 @@
-import { dbServer } from "./_dataClient.mjs";
+import { db } from "./_db.mjs";
 import { BLOCKED_TABLES } from "./sql-safety.mjs";
 import { getAiRequestContext } from "./audit-log.mjs";
 
@@ -69,7 +69,7 @@ async function validateColumns(table, columns) {
   const cleaned = columns.filter((c) => typeof c === "string" && c.trim().length > 0);
   if (cleaned.length === 0) return;
 
-  const { error } = await dbServer.rpc("_ai_validate_columns", {
+  const { error } = await db.rpc("_ai_validate_columns", {
     p_table: table,
     p_columns: cleaned,
   });
@@ -131,14 +131,14 @@ export async function executeTableQuery(
     ...collectFilterColumns(params.filters),
   ]);
 
-  // PostgREST/dbClient-js has no native column-vs-column filter syntax. When
+  // PostgREST has no native column-vs-column filter syntax. When
   // any filter uses a column-compare operator, route through the
   // ai_select_rows RPC which builds the SQL server-side with %I/%I.
   if (hasColumnCompareFilter(params.filters)) {
     return executeRowsViaRpc(params);
   }
 
-  let query = dbServer.from(params.table).select(params.select || "*");
+  let query = db.from(params.table).select(params.select || "*");
 
   if (params.filters) {
     for (const f of params.filters) {
@@ -228,7 +228,7 @@ function filtersToJsonb(filters) {
 async function executeRowsViaRpc(
   params,
 ) {
-  const { data, error } = await dbServer.rpc("ai_select_rows", {
+  const { data, error } = await db.rpc("ai_select_rows", {
     p_table: params.table,
     p_filters: filtersToJsonb(params.filters),
     p_select: params.select ?? "*",
@@ -263,7 +263,7 @@ export async function executeAggregate(
     ...collectFilterColumns(params.filters),
   ]);
 
-  const { data, error } = await dbServer.rpc("ai_aggregate", {
+  const { data, error } = await db.rpc("ai_aggregate", {
     p_table: params.table,
     p_filters: filtersToJsonb(params.filters),
     p_group_by: params.groupBy ?? null,
@@ -295,7 +295,7 @@ export async function executeCount(params) {
   // Stage 3: pre-validate filter column references.
   await validateColumns(params.table, collectFilterColumns(params.filters));
 
-  const { data, error } = await dbServer.rpc("ai_count", {
+  const { data, error } = await db.rpc("ai_count", {
     p_table: params.table,
     p_filters: filtersToJsonb(params.filters),
   });

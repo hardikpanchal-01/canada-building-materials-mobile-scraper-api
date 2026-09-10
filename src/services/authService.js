@@ -1,11 +1,47 @@
-const { getDb, getDbAdmin } = require('../config/database');
 const { executeDirectSQL } = require('../utils/postgresExecutor');
+const { executeAuthSQL } = require('../config/authPostgres');
+const { verifyPassword, hashPassword } = require('../utils/encryptionUtils');
 const { generateAccessToken, generateRefreshToken, verifyAccessToken, verifyRefreshToken } = require('../utils/jwtUtils');
 const deviceService = require('./deviceService');
 const { loadUserAccessData } = require('../middleware/auth');
 
 /**
- * Login with email and password using Postgres Auth
+ * Fetch an auth user row (auth.users) by a column, excluding deleted/banned checks
+ * are done by callers. Returns null when not found.
+ */
+async function getAuthUserBy(column, value) {
+  const result = await executeDirectSQL(
+    `SELECT id, email, phone, role, encrypted_password, raw_user_meta_data, banned_until, deleted_at, created_at
+     FROM auth.users
+     WHERE ${column} = $1 AND deleted_at IS NULL
+     LIMIT 1`,
+    [value]
+  );
+  return result.data.length > 0 ? result.data[0] : null;
+}
+
+/**
+ * Record a successful sign-in the same way the previous auth backend did:
+ * auth.users.last_sign_in_at and public.users.last_login_at.
+ * Best-effort — never fails the login.
+ */
+async function recordSignIn(authUserId, email) {
+  try {
+    await executeDirectSQL(
+      'UPDATE auth.users SET last_sign_in_at = NOW(), updated_at = NOW() WHERE id = $1',
+      [authUserId]
+    );
+    await executeDirectSQL(
+      'UPDATE users SET last_login_at = NOW() WHERE email = $1',
+      [email.toLowerCase().trim()]
+    );
+  } catch (err) {
+    console.error('Failed to record sign-in timestamps:', err.message);
+  }
+}
+
+/**
+ * Login with email and password against PostgreSQL (auth.users)
  * @param {string} email - User email
  * @param {string} password - User password
  * @param {Object} deviceInfo - Optional device information
@@ -13,7 +49,6 @@ const { loadUserAccessData } = require('../middleware/auth');
  */
 async function loginWithEmail(email, password, deviceInfo = null) {
   try {
-    const dbClient = getDb();
     const normalizedEmail = email.toLowerCase().trim();
 
     // ---------------------------------------------------------------
@@ -41,7 +76,7 @@ async function loginWithEmail(email, password, deviceInfo = null) {
 
     // Check if user exists in database
     const profileResult = await executeDirectSQL(
-      'SELECT active, user_type FROM users WHERE email = $1 LIMIT 1',
+      'SELECT active FROM users WHERE email = $1 LIMIT 1',
       [normalizedEmail]
     );
 
@@ -49,40 +84,39 @@ async function loginWithEmail(email, password, deviceInfo = null) {
       throw new Error('User not found');
     }
 
-    // Check admin approval — ONLY for QR signup users
-    const profile = profileResult.data[0];
-    if (profile.user_type === 'QR' && !profile.active) {
-      throw new Error('Your account is pending admin approval. You will be notified via email or phone once approved.');
-    }
-
     // ---------------------------------------------------------------
-    // Authenticate with Postgres Auth
+    // Authenticate against auth.users (bcrypt)
     // ---------------------------------------------------------------
-    const { data, error } = await dbClient.auth.signInWithPassword({
-      email: normalizedEmail,
-      password
-    });
+    const authUser = await getAuthUserBy('email', normalizedEmail);
 
-    if (error) {
-      throw new Error(error.message || 'Invalid email or password');
+    if (!authUser) {
+      throw new Error('Invalid email or password');
     }
 
-    if (!data.user) {
-      throw new Error('Authentication failed');
+    if (authUser.banned_until && new Date(authUser.banned_until) > new Date()) {
+      throw new Error('Invalid email or password');
     }
+
+    const passwordValid = await verifyPassword(password, authUser.encrypted_password);
+    if (!passwordValid) {
+      throw new Error('Invalid email or password');
+    }
+
+    // Record sign-in timestamps (non-blocking behavior preserved by best-effort call)
+    await recordSignIn(authUser.id, normalizedEmail);
 
     // Load user access data to determine userType (admin, producer, contractor, none)
-    const accessData = await loadUserAccessData(data.user.id);
+    const accessData = await loadUserAccessData(authUser.id);
 
     // Get user metadata
     const user = {
-      id: data.user.id,
-      email: data.user.email,
-      phone: data.user.phone,
-      role: data.user.role || 'user',
+      id: authUser.id,
+      email: authUser.email,
+      phone: authUser.phone,
+      role: authUser.role || 'user',
       userType: accessData.userType || 'none',
       userRole: accessData.userRole || null,
-      metadata: data.user.user_metadata
+      metadata: authUser.raw_user_meta_data
     };
 
     // Register/update device if device info is provided
@@ -103,7 +137,7 @@ async function loginWithEmail(email, password, deviceInfo = null) {
       user,
       accessToken,
       refreshToken,
-      session: data.session
+      session: null
     };
   } catch (error) {
     throw error;
@@ -111,7 +145,7 @@ async function loginWithEmail(email, password, deviceInfo = null) {
 }
 
 /**
- * Login with phone and password using Postgres Auth
+ * Login with phone and password against PostgreSQL (auth.users)
  * @param {string} phone - User phone number
  * @param {string} password - User password
  * @param {Object} deviceInfo - Optional device information
@@ -119,56 +153,49 @@ async function loginWithEmail(email, password, deviceInfo = null) {
  */
 async function loginWithPhone(phone, password, deviceInfo = null) {
   try {
-    const dbClient = getDb();
-    const dbAdmin = getDbAdmin();
-
     // ---------------------------------------------------------------
+    // Authenticate against auth.users by phone (bcrypt)
+    // ---------------------------------------------------------------
+    const authUser = await getAuthUserBy('phone', phone);
+
+    if (!authUser) {
+      throw new Error('Invalid phone number or password');
+    }
+
     // Pre-auth check: block users pending admin approval
-    // Look up email from auth user by phone, then check public.users.active
-    // ---------------------------------------------------------------
-    const { data: authUsers } = await dbAdmin.auth.admin.listUsers({ page: 1, perPage: 1000 });
-    if (authUsers?.users) {
-      const matchedAuth = authUsers.users.find(u => u.phone === phone);
-      if (matchedAuth?.email) {
-        const profileResult = await executeDirectSQL(
-          'SELECT active FROM users WHERE email = $1 LIMIT 1',
-          [matchedAuth.email.toLowerCase()]
-        );
-
-        if (profileResult.data.length > 0 && !profileResult.data[0].active) {
-          throw new Error('Your account is pending admin approval. You will be notified via email or phone once approved.');
-        }
+    if (authUser.email) {
+      const profileResult = await executeDirectSQL(
+        'SELECT active FROM users WHERE email = $1 LIMIT 1',
+        [authUser.email.toLowerCase()]
+      );
+      if (profileResult.data.length > 0 && !profileResult.data[0].active) {
+        throw new Error('Your account is pending admin approval. You will be notified via email or phone once approved.');
       }
     }
 
-    // ---------------------------------------------------------------
-    // Authenticate with Postgres Auth using phone
-    // ---------------------------------------------------------------
-    const { data, error } = await dbClient.auth.signInWithPassword({
-      phone,
-      password
-    });
-
-    if (error) {
-      throw new Error(error.message || 'Invalid phone number or password');
+    if (authUser.banned_until && new Date(authUser.banned_until) > new Date()) {
+      throw new Error('Invalid phone number or password');
     }
 
-    if (!data.user) {
-      throw new Error('Authentication failed');
+    const passwordValid = await verifyPassword(password, authUser.encrypted_password);
+    if (!passwordValid) {
+      throw new Error('Invalid phone number or password');
     }
+
+    await recordSignIn(authUser.id, authUser.email || '');
 
     // Load user access data to determine userType (admin, producer, contractor, none)
-    const accessData = await loadUserAccessData(data.user.id);
+    const accessData = await loadUserAccessData(authUser.id);
 
     // Get user metadata
     const user = {
-      id: data.user.id,
-      email: data.user.email,
-      phone: data.user.phone,
-      role: data.user.role || 'user',
+      id: authUser.id,
+      email: authUser.email,
+      phone: authUser.phone,
+      role: authUser.role || 'user',
       userType: accessData.userType || 'none',
       userRole: accessData.userRole || null,
-      metadata: data.user.user_metadata
+      metadata: authUser.raw_user_meta_data
     };
 
     // Register/update device if device info is provided
@@ -188,7 +215,7 @@ async function loginWithPhone(phone, password, deviceInfo = null) {
       user,
       accessToken,
       refreshToken,
-      session: data.session
+      session: null
     };
   } catch (error) {
     throw error;
@@ -196,16 +223,15 @@ async function loginWithPhone(phone, password, deviceInfo = null) {
 }
 
 /**
- * Logout user - invalidate session and deactivate device token
+ * Logout user - deactivate device token
+ * (JWT tokens are stateless; invalidation relies on token expiration)
  * @param {string} userId - User ID
- * @param {string} accessToken - Access token to invalidate
+ * @param {string} accessToken - Access token (kept for signature compatibility)
  * @param {string} deviceToken - Optional device token to deactivate
  * @returns {boolean} Success status
  */
 async function logout(userId, accessToken, deviceToken = null) {
   try {
-    const dbClient = getDb();
-    
     // Deactivate device token if provided
     if (deviceToken) {
       try {
@@ -214,13 +240,6 @@ async function logout(userId, accessToken, deviceToken = null) {
         // Log device deactivation error but don't fail logout
         console.error('⚠️  Device token deactivation failed during logout:', deviceError.message);
       }
-    }
-    
-    // Sign out from Postgres Auth
-    const { error } = await dbClient.auth.signOut();
-
-    if (error) {
-      throw new Error(error.message || 'Logout failed');
     }
 
     // In a production system, you might want to:
@@ -271,25 +290,25 @@ async function refreshToken(refreshToken) {
 }
 
 /**
- * Get current user from Postgres session
+ * Get current user by ID (auth.users)
+ * @param {string} userId - User UUID (from JWT)
  * @returns {Object} User data
  */
-async function getCurrentUser() {
+async function getCurrentUser(userId) {
   try {
-    const dbClient = getDb();
-    const { data: { user }, error } = await dbClient.auth.getUser();
+    const authUser = userId ? await getAuthUserBy('id', userId) : null;
 
-    if (error || !user) {
+    if (!authUser) {
       throw new Error('User not found or session expired');
     }
 
     return {
-      id: user.id,
-      email: user.email,
-      phone: user.phone,
-      role: user.role || 'user',
-      metadata: user.user_metadata,
-      createdAt: user.created_at
+      id: authUser.id,
+      email: authUser.email,
+      phone: authUser.phone,
+      role: authUser.role || 'user',
+      metadata: authUser.raw_user_meta_data,
+      createdAt: authUser.created_at
     };
   } catch (error) {
     throw error;
@@ -343,14 +362,10 @@ async function changePassword(userId, userEmail, currentPassword, newPassword, c
       };
     }
 
-    // Step 1: Verify current password by attempting to sign in
-    const dbClient = getDb();
-    const { data: signInData, error: signInError } = await dbClient.auth.signInWithPassword({
-      email: userEmail,
-      password: currentPassword
-    });
+    // Step 1: Verify current password against auth.users
+    const authUser = await getAuthUserBy('email', userEmail.toLowerCase().trim());
 
-    if (signInError || !signInData.user) {
+    if (!authUser || !(await verifyPassword(currentPassword, authUser.encrypted_password))) {
       return {
         success: false,
         error: 'Current password is incorrect',
@@ -358,20 +373,31 @@ async function changePassword(userId, userEmail, currentPassword, newPassword, c
       };
     }
 
-    // Step 2: Update password using Postgres Admin API
-    const dbAdmin = getDbAdmin();
-    const { data: updateData, error: updateError } = await dbAdmin.auth.admin.updateUserById(
-      userId,
-      { password: newPassword }
+    // Step 2: Update password hash in auth.users
+    const newHash = await hashPassword(newPassword);
+    const updateResult = await executeDirectSQL(
+      'UPDATE auth.users SET encrypted_password = $1, updated_at = NOW() WHERE id = $2 RETURNING id',
+      [newHash, authUser.id]
     );
 
-    if (updateError) {
-      console.error('Error updating password:', updateError.message);
+    if (updateResult.data.length === 0) {
+      console.error('Error updating password: no auth user row updated');
       return {
         success: false,
         error: 'Failed to update password. Please try again.',
         code: 'UPDATE_FAILED'
       };
+    }
+
+    // Step 3: Keep the central auth store (public.users) in sync so
+    // mobile federated login accepts the new password too. Best-effort.
+    try {
+      await executeAuthSQL(
+        'UPDATE public.users SET password_hash = $1, updated_at = NOW() WHERE email = $2 AND deleted_at IS NULL',
+        [newHash, userEmail.toLowerCase().trim()]
+      );
+    } catch (syncError) {
+      console.error('Warning: failed to sync new password to public.users:', syncError.message);
     }
 
     return {
@@ -397,5 +423,3 @@ module.exports = {
   verifyToken,
   changePassword
 };
-
-

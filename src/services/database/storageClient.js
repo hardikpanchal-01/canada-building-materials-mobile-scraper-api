@@ -1,207 +1,134 @@
 /**
- * Object storage client.
+ * Object storage for scraped-order batches.
  *
- * Provides configured object-storage operations for scraped-order JSON archival
- * and user avatars. Uses the service key and talks to the tenant's self-hosted
- * storage gateway via a thin fetch client (no hosted SDK). The public function
- * contracts (uploadToStorage / uploadAvatarToStorage / deleteAvatarFromStorage
- * returning { path, publicUrl } and the bucket-name exports) are unchanged.
+ * This used to upload JSON to the hosted provider's object storage. That is
+ * retired, so batches are written to the local uploads directory and served back
+ * through the API, mirroring how the web app handles its uploads.
  *
- * When DATA_GATEWAY_URL is NOT set, falls back to local file storage under
- * public/uploads/ (development). Files are served via Express static middleware.
+ * UPLOAD_DIR controls the root (default: <cwd>/uploads). In a container that
+ * should be a mounted volume — otherwise batches live only as long as the pod.
  */
 
-const fs = require('fs');
-const fsp = require('fs').promises;
+const fs = require('fs/promises');
 const path = require('path');
 
-let makeStorage;
-try { makeStorage = require('../../db/restFetch').makeStorage; } catch { makeStorage = null; }
+const BUCKET = process.env.SCRAPED_ORDERS_BUCKET || 'scraped-orders';
+const ROOT = process.env.UPLOAD_DIR || path.join(process.cwd(), 'uploads');
 
-const STORAGE_URL = process.env.DATA_GATEWAY_URL;
-const STORAGE_SERVICE_KEY = process.env.DATA_GATEWAY_SERVICE_KEY || process.env.DATA_GATEWAY_ANON_KEY;
+// Reject anything that could escape the bucket directory.
+const SAFE = /^[a-zA-Z0-9._/-]+$/;
 
-// Storage timeout configuration (default: 30 seconds)
-const STORAGE_TIMEOUT_MS = parseInt(process.env.STORAGE_TIMEOUT_MS) || 30000;
-
-// Only build the storage client if credentials are provided.
-let storage = null;
-if (STORAGE_URL && STORAGE_SERVICE_KEY && makeStorage) {
-  storage = makeStorage({ url: STORAGE_URL, serviceKey: STORAGE_SERVICE_KEY });
-}
-
-/** Storage bucket name for scraped orders */
-const SCRAPED_ORDERS_BUCKET = 'scraped-orders';
-
-/** Storage bucket name for user avatars */
-const AVATARS_BUCKET = 'avatars';
-
-// Local file storage fallback
-const USE_LOCAL_STORAGE = !storage;
-const LOCAL_UPLOADS_DIR = path.join(__dirname, '..', '..', '..', 'public', 'uploads');
-
-if (USE_LOCAL_STORAGE) {
-  fs.mkdirSync(path.join(LOCAL_UPLOADS_DIR, AVATARS_BUCKET), { recursive: true });
-  fs.mkdirSync(path.join(LOCAL_UPLOADS_DIR, SCRAPED_ORDERS_BUCKET), { recursive: true });
-  console.warn('⚠️  Storage credentials not configured - using local file storage (public/uploads/)');
-}
-
-function localUrlFor(key) {
-  const port = process.env.PORT || 5000;
-  return `http://localhost:${port}/uploads/${key}`;
-}
-
-/**
- * Upload JSON data to object storage with timeout protection
- *
- * @param {string} fileName - Name of the file to create
- * @param {object|array} data - Data to store as JSON
- * @param {number} timeoutMs - Timeout in milliseconds (default: STORAGE_TIMEOUT_MS)
- * @returns {Promise<{path: string, publicUrl: string}>} Upload result
- */
-async function uploadToStorage(fileName, data, timeoutMs = STORAGE_TIMEOUT_MS) {
-  const key = `${SCRAPED_ORDERS_BUCKET}/${fileName}`;
-
-  if (USE_LOCAL_STORAGE) {
-    const filePath = path.join(LOCAL_UPLOADS_DIR, key);
-    await fsp.mkdir(path.dirname(filePath), { recursive: true });
-    await fsp.writeFile(filePath, JSON.stringify(data, null, 2), 'utf-8');
-    return { path: key, publicUrl: localUrlFor(key) };
-  }
-
-  const jsonContent = JSON.stringify(data, null, 2);
-  const buffer = Buffer.from(jsonContent, 'utf-8');
-
-  const uploadPromise = storage
-    .from(SCRAPED_ORDERS_BUCKET)
-    .upload(fileName, buffer, {
-      contentType: 'application/json',
-      upsert: false,
-    });
-
-  const timeoutPromise = new Promise((_, reject) =>
-    setTimeout(
-      () => reject(new Error(`Storage upload timeout after ${timeoutMs}ms`)),
-      timeoutMs
-    )
-  );
-
-  try {
-    const { data: uploadData, error: uploadError } = await Promise.race([
-      uploadPromise,
-      timeoutPromise,
-    ]);
-
-    if (uploadError) {
-      throw new Error(`Storage upload failed: ${uploadError.message}`);
-    }
-
-    const { data: urlData } = storage
-      .from(SCRAPED_ORDERS_BUCKET)
-      .getPublicUrl(fileName);
-
-    return {
-      path: uploadData.path,
-      publicUrl: urlData.publicUrl,
-    };
-  } catch (error) {
-    if (error.message.includes('timeout')) {
-      console.error(`Storage upload timed out after ${timeoutMs}ms`);
-    }
-    throw error;
+function assertSafe(filePath) {
+  if (!SAFE.test(filePath) || filePath.includes('..')) {
+    throw new Error('Invalid storage path');
   }
 }
 
 /**
- * Upload an avatar image to object storage
- *
- * @param {string} userId - User ID used to namespace the file
- * @param {Buffer} fileBuffer - Raw file buffer
- * @param {string} mimeType - MIME type (e.g. 'image/png')
- * @param {string} originalName - Original file name for extension extraction
- * @returns {Promise<{path: string, publicUrl: string}>} Upload result
+ * Write a JSON payload to storage.
+ * @param {string} fileName - object key within the bucket
+ * @param {object|string|Buffer} data - payload; objects are JSON-encoded
+ * @returns {Promise<{path: string, publicUrl: string}>}
  */
-async function uploadAvatarToStorage(userId, fileBuffer, mimeType, originalName) {
-  const ext = originalName.split('.').pop().toLowerCase();
-  const fileName = `${userId}/avatar_${Date.now()}.${ext}`;
-  const key = `${AVATARS_BUCKET}/${fileName}`;
+async function uploadToStorage(fileName, data) {
+  assertSafe(fileName);
+  const dest = path.join(ROOT, BUCKET, fileName);
+  await fs.mkdir(path.dirname(dest), { recursive: true });
 
-  if (USE_LOCAL_STORAGE) {
-    const filePath = path.join(LOCAL_UPLOADS_DIR, key);
-    await fsp.mkdir(path.dirname(filePath), { recursive: true });
-    await fsp.writeFile(filePath, fileBuffer);
-    return { path: key, publicUrl: localUrlFor(key) };
-  }
+  const body =
+    Buffer.isBuffer(data) || typeof data === 'string'
+      ? data
+      : JSON.stringify(data);
 
-  const uploadPromise = storage
-    .from(AVATARS_BUCKET)
-    .upload(fileName, fileBuffer, {
-      contentType: mimeType,
-      upsert: true,
-    });
-
-  const timeoutPromise = new Promise((_, reject) =>
-    setTimeout(
-      () => reject(new Error(`Avatar upload timeout after ${STORAGE_TIMEOUT_MS}ms`)),
-      STORAGE_TIMEOUT_MS
-    )
-  );
-
-  const { data: uploadData, error: uploadError } = await Promise.race([
-    uploadPromise,
-    timeoutPromise,
-  ]);
-
-  if (uploadError) {
-    throw new Error(`Avatar upload failed: ${uploadError.message}`);
-  }
-
-  const { data: urlData } = storage
-    .from(AVATARS_BUCKET)
-    .getPublicUrl(fileName);
+  await fs.writeFile(dest, body);
 
   return {
-    path: uploadData.path,
-    publicUrl: urlData.publicUrl,
+    path: `${BUCKET}/${fileName}`,
+    publicUrl: `/api/files/${BUCKET}/${fileName}`,
   };
 }
 
 /**
- * Delete an avatar file from object storage
- *
- * @param {string} filePath - The storage path of the file to delete
- * @returns {Promise<void>}
+ * Read a previously stored object back.
+ * @param {string} fileName - object key within the bucket
+ * @returns {Promise<Buffer>}
  */
-async function deleteAvatarFromStorage(filePath) {
-  const key = filePath.startsWith(`${AVATARS_BUCKET}/`) ? filePath : `${AVATARS_BUCKET}/${filePath}`;
+async function downloadFromStorage(fileName) {
+  assertSafe(fileName);
+  return fs.readFile(path.join(ROOT, BUCKET, fileName));
+}
 
-  if (USE_LOCAL_STORAGE) {
-    try {
-      const localPath = path.join(LOCAL_UPLOADS_DIR, key);
-      await fsp.access(localPath).then(() => fsp.unlink(localPath)).catch(() => {});
-    } catch (error) {
-      console.warn('Failed to delete local avatar:', error.message);
-    }
-    return;
+/**
+ * Delete a stored object. Missing files are not an error.
+ * @param {string} fileName - object key within the bucket
+ */
+async function removeFromStorage(fileName) {
+  assertSafe(fileName);
+  try {
+    await fs.unlink(path.join(ROOT, BUCKET, fileName));
+  } catch (e) {
+    if (e.code !== 'ENOENT') throw e;
   }
+}
 
-  const { error } = await storage
-    .from(AVATARS_BUCKET)
-    .remove([filePath]);
+const AVATARS_BUCKET = process.env.AVATARS_BUCKET || 'avatars';
 
-  if (error) {
-    console.warn('Failed to delete old avatar from storage:', error.message);
+function extensionFor(mimeType, originalName) {
+  const fromName = originalName && originalName.includes('.')
+    ? originalName.slice(originalName.lastIndexOf('.') + 1).toLowerCase()
+    : '';
+  if (/^[a-z0-9]{1,5}$/.test(fromName)) return fromName;
+  const map = {
+    'image/jpeg': 'jpg',
+    'image/jpg': 'jpg',
+    'image/png': 'png',
+    'image/webp': 'webp',
+    'image/gif': 'gif',
+  };
+  return map[mimeType] || 'bin';
+}
+
+/**
+ * Store a user avatar.
+ * @param {string} userId
+ * @param {Buffer} fileBuffer
+ * @param {string} mimeType
+ * @param {string} originalName
+ * @returns {Promise<{path: string, publicUrl: string}>}
+ */
+async function uploadAvatarToStorage(userId, fileBuffer, mimeType, originalName) {
+  const ext = extensionFor(mimeType, originalName);
+  // A per-user prefix keeps replacement simple and avoids collisions.
+  const key = `${String(userId).replace(/[^a-zA-Z0-9_-]/g, '')}/avatar.${ext}`;
+  const dest = path.join(ROOT, AVATARS_BUCKET, key);
+  await fs.mkdir(path.dirname(dest), { recursive: true });
+  await fs.writeFile(dest, fileBuffer);
+  return {
+    path: `${AVATARS_BUCKET}/${key}`,
+    publicUrl: `/api/files/${AVATARS_BUCKET}/${key}`,
+  };
+}
+
+/**
+ * Delete a stored avatar. Missing files are not an error.
+ * @param {string} key - path within the avatars bucket
+ */
+async function deleteAvatarFromStorage(key) {
+  assertSafe(key);
+  try {
+    await fs.unlink(path.join(ROOT, AVATARS_BUCKET, key));
+  } catch (e) {
+    if (e.code !== 'ENOENT') throw e;
   }
 }
 
 module.exports = {
-  // kept for backward-compat with any importer expecting a storage handle
-  dbClient: storage,
-  storage,
-  SCRAPED_ORDERS_BUCKET,
-  AVATARS_BUCKET,
   uploadToStorage,
+  downloadFromStorage,
+  removeFromStorage,
   uploadAvatarToStorage,
   deleteAvatarFromStorage,
-  STORAGE_TIMEOUT_MS,
+  AVATARS_BUCKET,
+  BUCKET,
+  ROOT,
 };

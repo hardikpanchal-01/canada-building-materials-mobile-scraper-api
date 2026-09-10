@@ -7,7 +7,7 @@
 
 const { executeDirectSQL } = require('../utils/postgresExecutor');
 const { compareOrdersWithSystem, revalidateMismatchedOrders, revalidateMissingOrders, fetchDashboardCounts } = require('./orderComparisonService');
-const { sendComparisonEmail, shouldHideRevalidatedOrderForFreshMatch } = require('./emailService');
+const { sendComparisonEmail, sendPerfectMatchEmail, sendDailyBreakdownEmail, shouldHideRevalidatedOrderForFreshMatch } = require('./emailService');
 const { storeComparisonResult } = require('./database/comparisonDatabaseService');
 const { fetchExclusionPatterns, filterExcludedOrders } = require('./exclusionPatternService');
 const { filterAlreadyEmailedOrders, recordEmailedOrders, updateSummaryWithFilteredCounts } = require('./database/emailedOrdersService');
@@ -82,8 +82,20 @@ async function resetStaleJobs() {
  * @returns {Promise<array>} Array of pending job records
  */
 async function fetchPendingJobs(limit = 5) {
+  // Use UPDATE ... RETURNING to atomically claim jobs, preventing race conditions
+  // where multiple workers could fetch and process the same job.
   const sql = `
-    SELECT
+    UPDATE scraped_order_imports
+    SET processing_status = 'processing',
+        processing_started_at = NOW()
+    WHERE id IN (
+      SELECT id FROM scraped_order_imports
+      WHERE processing_status = 'pending'
+      ORDER BY created_at ASC
+      LIMIT $1
+      FOR UPDATE SKIP LOCKED
+    )
+    RETURNING
       id,
       batch_id,
       file_url,
@@ -93,10 +105,6 @@ async function fetchPendingJobs(limit = 5) {
       retry_count,
       email_sent_at,
       created_at
-    FROM scraped_order_imports
-    WHERE processing_status = 'pending'
-    ORDER BY created_at ASC
-    LIMIT $1
   `;
 
   const result = await executeDirectSQL(sql, [limit]);
@@ -116,13 +124,15 @@ async function fetchPendingJobs(limit = 5) {
  * @returns {Promise<boolean>} True if job was locked successfully
  */
 async function lockJob(batchId) {
+  // Accept jobs already claimed by fetchPendingJobs (status = 'processing')
+  // or still pending (backward compat if fetchPendingJobs changes)
   const sql = `
     UPDATE scraped_order_imports
     SET
       processing_status = 'processing',
       processing_started_at = NOW()
     WHERE batch_id = $1
-      AND processing_status = 'pending'
+      AND processing_status IN ('pending', 'processing')
     RETURNING id
   `;
 
@@ -132,7 +142,7 @@ async function lockJob(batchId) {
     throw new Error(`Failed to lock job: ${result.error}`);
   }
 
-  // If no rows were updated, another worker already grabbed this job
+  // If no rows were updated, job was already completed or failed
   return result.data && result.data.length > 0;
 }
 
@@ -258,7 +268,7 @@ async function markFailed(batchId, error, currentRetryCount) {
 }
 
 /**
- * Fetch orders from Postgres Storage
+ * Fetch orders from S3 storage
  *
  * @param {string} fileUrl - URL to the stored orders JSON file
  * @returns {Promise<array>} Array of orders
@@ -430,7 +440,11 @@ async function processOrdersInBatches(orders, batchId, fileUrl, startTime, batch
  */
 async function processJob(job) {
   const startTime = Date.now();
-  const { batch_id, file_url, orders_count, retry_count, email_sent_at } = job;
+  const { batch_id, file_url, orders_count, retry_count, email_sent_at, scraper_id } = job;
+
+  // Browser-extension batches (scraper_id ends with "-extension") get a positive
+  // "100% Perfect Match" email when there are no issues, instead of skipping silently.
+  const isExtension = typeof scraper_id === 'string' && scraper_id.endsWith('-extension');
 
   console.log(`\nProcessing job: ${batch_id} (${orders_count} orders, attempt ${retry_count + 1}/${MAX_RETRIES})`);
 
@@ -448,6 +462,24 @@ async function processJob(job) {
     if (!orders || orders.length === 0) {
       throw new Error('No orders found in storage file');
     }
+
+    // Tag extension-sourced orders so the comparison can skip start_time for them
+    // (the extension's start_time comes from the feed and is noisy; we don't compare
+    // it for extension batches — other scrapers are unaffected).
+    if (isExtension) {
+      for (const o of orders) o._from_extension = true;
+    }
+
+    // Per-day scraped totals + multi-day detection (for the daily-breakdown email).
+    // A multi-day EXTENSION batch (e.g. a 2-week range) gets the per-day report; a
+    // single-day batch keeps the existing green / comparison emails.
+    const perDayTotals = {};
+    for (const o of orders) {
+      const d = String(o.order_date || '').slice(0, 10);
+      if (d) perDayTotals[d] = (perDayTotals[d] || 0) + 1;
+    }
+    const distinctDates = Object.keys(perDayTotals).length;
+    const isDailyBreakdown = isExtension && distinctDates > 1;
 
     // Step 3: Run comparison
     let comparisonResult;
@@ -536,6 +568,7 @@ async function processJob(job) {
 
     // Step 5.5: Filter out already-emailed orders (order-level deduplication)
     let shouldSendEmail = true;
+    let isPerfectMatch = false; // extension batch, nothing flagged → green banner email
     try {
       const { filteredResult, filteredCount, newOrdersCount } = await filterAlreadyEmailedOrders(emailComparisonResult.fullResult);
 
@@ -554,7 +587,7 @@ async function processJob(job) {
       // Continue with unfiltered results to avoid blocking emails on deduplication errors
     }
 
-    // Step 5.6: Re-validate ONLY the filtered mismatched orders via Command Cloud API
+    // Step 5.6: Re-validate ONLY the filtered mismatched orders via ConcreteGo API
     let revalidationResults = null;
     const filteredMismatched = emailComparisonResult.fullResult?.mismatched_orders || [];
     console.log(`📋 Mismatched orders for re-validation: ${filteredMismatched.length} (after exclusion + dedup filtering)`);
@@ -569,8 +602,10 @@ async function processJob(job) {
           if (missingCount > 0) {
             console.log(`All ${revalidationResults.resolved_count} mismatched order(s) resolved after re-validation, but ${missingCount} missing order(s) still need reporting`);
           } else {
-            console.log(`All ${revalidationResults.resolved_count} mismatched order(s) resolved after re-validation and no missing orders - skipping email`);
-            shouldSendEmail = false;
+            console.log(`All ${revalidationResults.resolved_count} mismatched order(s) resolved after re-validation and no missing orders`);
+            // Non-extension: skip (existing behavior). Extension: keep going so the
+            // green "100% accuracy" email can fire when 0 mismatches remain.
+            if (!isExtension) shouldSendEmail = false;
           }
         }
       } catch (revalError) {
@@ -603,7 +638,7 @@ async function processJob(job) {
       }
     }
 
-    // Step 5.6.3: Re-validate MISSING orders via Command Cloud API
+    // Step 5.6.3: Re-validate MISSING orders via ConcreteGo API
     // If found in API, insert into Truckast DB and mark as resolved
     let missingRevalidationResults = null;
     const filteredMissing = emailComparisonResult.fullResult?.missing_in_system_orders || [];
@@ -656,7 +691,7 @@ async function processJob(job) {
 
     // Step 5.6.6: Skip email if there are no issues (0 visible mismatched + 0 missing in system)
     // IMPORTANT: Use the same hide filter as the email display — count only orders
-    // that have visible differences (Command Cloud !== API). Without this, the email
+    // that have visible differences (ConcreteGo !== API). Without this, the email
     // would be sent showing Mismatched=0 when all mismatches are hidden by the filter.
     if (shouldSendEmail) {
       let finalMismatchedCount;
@@ -671,8 +706,16 @@ async function processJob(job) {
       const finalMissingCount = emailComparisonResult.fullResult?.missing_in_system_orders?.length || 0;
 
       if (finalMismatchedCount === 0 && finalMissingCount === 0) {
-        console.log(`No issues to report (visible mismatched: ${finalMismatchedCount}, missing: ${finalMissingCount}) - skipping email`);
-        shouldSendEmail = false;
+        // 0 mismatches REMAIN after re-validation (any flagged orders were cleared —
+        // the live ConcreteGo API agrees, DB auto-corrected). For extension batches
+        // this is a 100% match → green accuracy email. Otherwise skip (existing).
+        if (isExtension) {
+          isPerfectMatch = true;
+          console.log(`Extension batch: 0 mismatches remain after re-validation (missing 0) - sending 100% accuracy email`);
+        } else {
+          console.log(`No issues to report (visible mismatched: ${finalMismatchedCount}, missing: ${finalMissingCount}) - skipping email`);
+          shouldSendEmail = false;
+        }
       }
     }
 
@@ -723,9 +766,20 @@ async function processJob(job) {
       emailLogSkipReason = emailSkipReason || 'No issues to report';
     } else {
       try {
-        await sendComparisonEmail(emailComparisonResult.summary, emailComparisonResult.fullResult, revalidationResults, missingRevalidationResults);
-        await markEmailSent(batch_id);  // Mark email as sent IMMEDIATELY after success
-        console.log(`Email sent successfully`);
+        if (isDailyBreakdown) {
+          // Multi-day extension batch → one per-day breakdown email (table + per-day lists).
+          await sendDailyBreakdownEmail(emailComparisonResult.summary, perDayTotals, emailComparisonResult.fullResult, revalidationResults);
+          await markEmailSent(batch_id);
+          console.log(`Daily-breakdown email sent successfully (${distinctDates} days)`);
+        } else if (isPerfectMatch) {
+          await sendPerfectMatchEmail(emailComparisonResult.summary);
+          await markEmailSent(batch_id);
+          console.log(`Perfect-match (100% accuracy) email sent successfully`);
+        } else {
+          await sendComparisonEmail(emailComparisonResult.summary, emailComparisonResult.fullResult, revalidationResults, missingRevalidationResults);
+          await markEmailSent(batch_id);  // Mark email as sent IMMEDIATELY after success
+          console.log(`Email sent successfully`);
+        }
         emailLogStatus = 'sent';
 
         // Step 6.5: Record which orders were emailed (for future deduplication)

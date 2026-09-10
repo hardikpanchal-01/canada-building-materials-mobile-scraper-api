@@ -331,7 +331,7 @@ async function getOrderRequestById(id, tz = null, tenantTz = null) {
       `SELECT ${ORDER_ENTITY_SELECT} FROM order_entities WHERE id = $1 LIMIT 1`,
       [id]
     );
-    data = result.data?.[0] || null;
+    data = result.data[0] || null;
   } catch (error) {
     throw new Error(`Order request not found: ${error.message}`);
   }
@@ -565,7 +565,7 @@ async function sendMessage(orderEntityId, senderId, messageText, senderRole, tz 
       `SELECT full_name, email FROM users WHERE id = $1 LIMIT 1`,
       [senderId]
     );
-    userProfile = userResult.data?.[0] || null;
+    userProfile = userResult.data[0] || null;
   } catch {
     userProfile = null;
   }

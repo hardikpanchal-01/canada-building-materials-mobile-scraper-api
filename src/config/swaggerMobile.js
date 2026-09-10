@@ -60,7 +60,7 @@ Error codes:
     },
     servers: [
       {
-        url: process.env.API_BASE_URL || 'https://api.truckast.ai',
+        url: process.env.API_BASE_URL || 'http://api.truckast.ai',
         description: process.env.NODE_ENV === 'production' ? 'Production Server' : 'Development Server'
       }
     ],

@@ -57,7 +57,7 @@ async function getNewDashboardData(userId, userAccess = null, pagination = {}, d
     }
 
     // Check cache first (include userAccess, pagination, and dates in cache key)
-    const cacheKey = `new_${userId}_${userAccess?.userType || 'default'}_${pagination.page || 1}_${pagination.limit || 10}_${dateFrom}_${dateTo}`;
+    const cacheKey = `new_${userId}_${userAccess?.userType || 'default'}_${pagination.page || 1}_${pagination.limit || 10}_${dateFrom}_${dateTo}_${tz?.iana || 'default'}`;
     const now = Date.now();
     const cached = _dashboardCache.get(cacheKey);
     if (cached && (now - cached.timestamp) < DASHBOARD_CACHE_TTL_MS) {
@@ -65,10 +65,11 @@ async function getNewDashboardData(userId, userAccess = null, pagination = {}, d
     }
 
     // Get user profile and exclusion patterns in parallel.
-    // affects_counts=true subset so dashboard counts align with web summary.
+    // Full active pattern set so dashboard counts match web RPC
+    // get_orders_summary (which ignores affects_counts post-2026-05-11).
     const [userProfile, exclusionPatterns] = await Promise.all([
       getUserProfile(userId, userEmail),
-      fetchExclusionPatterns({ affectsCountsOnly: true })
+      fetchExclusionPatterns()
     ]);
 
     // Execute all queries in parallel (pass userAccess for filtering)
@@ -147,9 +148,6 @@ async function getNewDashboardData(userId, userAccess = null, pagination = {}, d
     } catch {}
 
     const dashboardData = {
-      // Tenant volume unit (m³ for metric tenants like CBM, CY for US). The shared
-      // mobile app reads this and renders it instead of a hardcoded "CY".
-      volume_unit: process.env.VOLUME_UNIT || 'CY',
       date_range: {
         start_date: formatDateStr(dateFrom),
         end_date: formatDateStr(dateTo),
@@ -291,7 +289,7 @@ async function getActiveDeliveries(dateStr, exclusionPatterns = [], userAccess =
         STRING_AGG(DISTINCT op.item_code, ', ') as product_codes
       FROM orders o
       INNER JOIN order_products op ON op.order_id = o.order_id
-        AND (op.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op.is_mix = true)
+        AND (op.order_qty_unit = 'YDQ' AND op.is_mix = true)
       LEFT JOIN order_product_schedules ops ON ops.order_product_id = op.id
       WHERE ${whereConditions.join(' AND ')}
       GROUP BY o.order_id, o.order_code, o.order_date, o.customer_name,
@@ -355,7 +353,7 @@ async function getActiveDeliveries(dateStr, exclusionPatterns = [], userAccess =
         END as ticket_status
       FROM tickets t
       INNER JOIN in_progress_orders ipo ON ipo.order_id = t.order_id
-      LEFT JOIN ticket_products tp ON tp.ticket_id = t.ticket_id AND (tp.is_mix = true OR tp.order_qty_unit IN ('m3', 'M3', 'CY', 'YDQ', '40013'))
+      LEFT JOIN ticket_products tp ON tp.ticket_id = t.ticket_id AND tp.is_mix = true
       WHERE (t.remove_reason_code IS NULL OR TRIM(t.remove_reason_code) = '')
     ),
     recent_ticket AS (

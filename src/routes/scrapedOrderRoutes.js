@@ -8,10 +8,7 @@
  */
 
 const express = require('express');
-const {
-  ingestScrapedOrdersController,
-  ingestLiteScrapedOrdersController
-} = require('../controllers/scrapedOrderController');
+const { ingestScrapedOrdersController } = require('../controllers/scrapedOrderController');
 const { scraperAuthMiddleware } = require('../middleware/scraperAuth');
 
 const router = express.Router();
@@ -30,7 +27,7 @@ const router = express.Router();
  *       1. Validates the request payload structure
  *       2. Validates each order against required fields and format rules
  *       3. Sanitizes and normalizes data (dates, quantities, statuses)
- *       4. Uploads validated orders to Postgres Storage as JSON
+ *       4. Uploads validated orders to S3 storage as JSON
  *       5. Creates a tracking record in the database
  *       6. Returns batch ID and file URL for downstream processing
  *     tags: [Scraped Orders]
@@ -130,67 +127,6 @@ const router = express.Router();
  *         description: Server error
  */
 router.post('/scraped-orders/ingest', scraperAuthMiddleware, ingestScrapedOrdersController);
-
-/**
- * @swagger
- * /api/scraped-orders/ingest-lite:
- *   post:
- *     summary: Ingest scraped orders (lite — Connex extension)
- *     description: |
- *       Synchronous, self-contained comparison for the Connex browser extension.
- *
- *       Accepts a reduced order shape (order_code, order_date, ordered_qty,
- *       delivered_qty, status), matches each order by order_code + order_date,
- *       compares ONLY quantity + status, and always emails the comparison report.
- *
- *       No Command Cloud re-validation, DB writes, time-window guard, or
- *       already-emailed dedup are applied. Returns the comparison counts and
- *       email status directly in the response.
- *
- *       **Authentication:** requires a valid API key in the `x-scraper-api-key` header.
- *     tags: [Scraped Orders]
- *     security:
- *       - ApiKeyAuth: []
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required: [orders]
- *             properties:
- *               orders:
- *                 type: array
- *                 minItems: 1
- *                 items:
- *                   type: object
- *                   required: [order_code, order_date]
- *                   properties:
- *                     order_code: { type: string, example: "50866-1" }
- *                     order_date: { type: string, example: "2026-06-04" }
- *                     ordered_qty: { type: number, example: 40 }
- *                     delivered_qty: { type: number, example: 30 }
- *                     status: { type: string, example: "Normal" }
- *           example:
- *             orders:
- *               - order_code: "50866-1"
- *                 order_date: "2026-06-04"
- *                 ordered_qty: 40
- *                 delivered_qty: 30
- *                 status: "Normal"
- *             scraper_id: "connex-extension"
- *             source_url: "https://connex.us.commandalkon.io/app/dispatch-exp/.../orders"
- *     responses:
- *       200:
- *         description: Lite comparison completed (includes email status)
- *       400:
- *         description: Validation error
- *       401:
- *         description: Unauthorized - Invalid or missing API key
- *       500:
- *         description: Server error
- */
-router.post('/scraped-orders/ingest-lite', scraperAuthMiddleware, ingestLiteScrapedOrdersController);
 
 module.exports = router;
 

@@ -108,6 +108,41 @@ const router = express.Router();
  */
 router.get('/health', healthCheck);
 
+/**
+ * @swagger
+ * /live:
+ *   get:
+ *     summary: Liveness probe
+ *     description: Always returns 200 if the process is running. Does not touch the database.
+ *     tags: [Health]
+ *     responses:
+ *       200:
+ *         description: Process is alive
+ */
+router.get('/live', (req, res) => {
+  res.status(200).json({ status: 'alive', timestamp: new Date().toISOString() });
+});
+
+/**
+ * @swagger
+ * /ready:
+ *   get:
+ *     summary: Readiness probe
+ *     description: Returns 200 once the server is accepting connections. Does not fail on DB issues (use /health for DB connectivity).
+ *     tags: [Health]
+ *     responses:
+ *       200:
+ *         description: Server is ready
+ */
+router.get('/ready', (req, res) => {
+  res.status(200).json({ status: 'ready', timestamp: new Date().toISOString() });
+});
+
+// Alias used by the deployed container/K8s probes.
+router.get('/api/sentry-health', (req, res) => {
+  res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
 module.exports = router;
 
 

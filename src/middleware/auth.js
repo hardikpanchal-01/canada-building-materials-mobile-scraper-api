@@ -10,11 +10,11 @@ const DEBUG = process.env.LOG_LEVEL === 'debug';
 
 // In-memory cache for user access data (5-minute TTL)
 const _accessCache = new Map();
-const ACCESS_CACHE_TTL_MS = 5 * 60 * 1000;
+const ACCESS_CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes (was 5 min — port-forward UUID resolution is slow)
 
 // Short-lived cache for user timezone preferences (30-second TTL for quick updates)
 const _tzPrefCache = new Map();
-const TZ_PREF_CACHE_TTL_MS = 30 * 1000;
+const TZ_PREF_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes (mobile sends X-Timezone header anyway)
 
 // Clean up expired cache entries every 5 minutes
 setInterval(() => {
@@ -42,10 +42,10 @@ async function isUserAdmin(userId) {
     `;
     const result = await executeDirectSQL(sql, [userId, ADMIN_ROLE_CODE]);
     const isAdmin = result.data && result.data.length > 0;
-    if (DEBUG) console.log(`[AccessControl] isUserAdmin(${userId}): ${isAdmin}`);
+    console.log(`[AccessControl] isUserAdmin(${userId}): ${isAdmin}`);
     return isAdmin;
   } catch (error) {
-    console.error('[AccessControl] Error checking admin status:', error.message);
+    console.error(`[AccessControl] isUserAdmin(${userId}) ERROR:`, error.message);
     return false;
   }
 }
@@ -181,24 +181,27 @@ async function getAllowedCustomerIdsForUser(userId) {
  * Resolve a UUID user ID to the integer ID used in tenant_users.
  * If the userId is already numeric, returns it as-is.
  */
-async function resolveUserId(userId) {
+async function resolveUserId(_unused, userId) {
   // If already a number, return directly
   if (typeof userId === 'number' || /^\d+$/.test(userId)) {
     return Number(userId);
   }
 
-  // UUID — look up integer id from users (auth pool has search_path=auth_tenant,public)
-  const result = await executeAuthSQL(
-    'SELECT id FROM users WHERE uuid = $1 AND deleted_at IS NULL LIMIT 1',
-    [userId]
-  );
-
-  if (!result.data || result.data.length === 0) {
-    console.log('[AccessControl] resolveUserId: could not find integer id for UUID:', userId);
+  // UUID — look up integer id from public.users
+  try {
+    const result = await executeAuthSQL(
+      'SELECT id FROM public.users WHERE uuid = $1 AND deleted_at IS NULL LIMIT 1',
+      [userId]
+    );
+    if (result.data.length === 0) {
+      console.log('[AccessControl] resolveUserId: could not find integer id for UUID:', userId);
+      return null;
+    }
+    return result.data[0].id;
+  } catch (error) {
+    console.log('[AccessControl] resolveUserId: could not find integer id for UUID:', userId, 'error:', error?.message);
     return null;
   }
-
-  return result.data[0].id;
 }
 
 /**
@@ -211,44 +214,30 @@ const DEFAULT_TIMEZONE = { iana: 'America/Chicago' };
 
 async function getTenantTimezoneForUser(userId) {
   try {
+    let timezoneValue = null;
+
     // Resolve UUID to integer user ID if needed
-    const numericUserId = await resolveUserId(userId);
+    const numericUserId = await resolveUserId(null, userId);
     if (!numericUserId) return DEFAULT_TIMEZONE;
 
-    // Step 1: Get tenant_id from tenant_users
-    const tuResult = await executeAuthSQL(
-      'SELECT tenant_id FROM tenant_users WHERE user_id = $1 AND status = $2 LIMIT 1',
-      [numericUserId, 'active']
+    const result = await executeAuthSQL(
+      `SELECT t.timezone
+       FROM public.tenant_users tu
+       JOIN public.tenants t ON t.id = tu.tenant_id AND t.deleted_at IS NULL
+       WHERE tu.user_id = $1 AND tu.status = 'active'
+       LIMIT 1`,
+      [numericUserId]
     );
 
-    if (!tuResult.data || tuResult.data.length === 0) {
+    if (result.data.length === 0) {
       return DEFAULT_TIMEZONE;
     }
+    timezoneValue = result.data[0].timezone;
 
-    // Step 2: Get timezone from tenants
-    const tResult = await executeAuthSQL(
-      'SELECT timezone FROM tenants WHERE id = $1 AND deleted_at IS NULL LIMIT 1',
-      [tuResult.data[0].tenant_id]
-    );
-
-    if (!tResult.data || tResult.data.length === 0) {
-      return DEFAULT_TIMEZONE;
-    }
-
-    if (tResult.data[0].timezone) {
-      let tz = tResult.data[0].timezone;
-      // Direct Postgres may return jsonb as object or text/varchar as string.
-      // Parse JSON strings so we can extract the iana_code field.
-      if (typeof tz === 'string' && tz.startsWith('{')) {
-        try { tz = JSON.parse(tz); } catch { /* leave as-is */ }
-      }
-      let iana = null;
-      if (typeof tz === 'string') {
-        // Plain IANA string like "America/Chicago"
-        iana = tz.includes('/') ? tz : null;
-      } else if (typeof tz === 'object' && tz !== null) {
-        iana = tz.iana || tz.iana_code || null;
-      }
+    if (timezoneValue) {
+      const tz = timezoneValue;
+      // Support both { iana: "America/Chicago" } and plain string "America/Chicago"
+      const iana = typeof tz === 'string' ? tz : (tz.iana || null);
       return iana ? { iana } : DEFAULT_TIMEZONE;
     }
     // Tenant found but no timezone set — use default
@@ -267,35 +256,25 @@ async function getTenantTimezoneForUser(userId) {
 async function getTenantShowRegionForUser(userId) {
   try {
     // Resolve UUID to integer user ID if needed
-    const numericUserId = await resolveUserId(userId);
+    const numericUserId = await resolveUserId(null, userId);
     if (!numericUserId) return false;
 
-    // Step 1: Get tenant_id from tenant_users
-    const tuResult = await executeAuthSQL(
-      'SELECT tenant_id FROM tenant_users WHERE user_id = $1 AND status = $2 LIMIT 1',
-      [numericUserId, 'active']
+    const result = await executeAuthSQL(
+      `SELECT t.show_regions
+       FROM public.tenant_users tu
+       JOIN public.tenants t ON t.id = tu.tenant_id AND t.deleted_at IS NULL
+       WHERE tu.user_id = $1 AND tu.status = 'active'
+       LIMIT 1`,
+      [numericUserId]
     );
 
-    if (!tuResult.data || tuResult.data.length === 0) {
-      console.log('[AccessControl] show_regions: no tenant_user found for userId:', userId);
+    if (result.data.length === 0) {
+      console.log('[AccessControl] show_regions: no tenant/tenant_user found for userId:', userId);
       return false;
     }
 
-    console.log('[AccessControl] show_regions: found tenant_id:', tuResult.data[0].tenant_id, 'for userId:', userId);
-
-    // Step 2: Get show_regions from tenants
-    const tResult = await executeAuthSQL(
-      'SELECT show_regions FROM tenants WHERE id = $1 AND deleted_at IS NULL LIMIT 1',
-      [tuResult.data[0].tenant_id]
-    );
-
-    if (!tResult.data || tResult.data.length === 0) {
-      console.log('[AccessControl] show_regions: no tenant found for tenant_id:', tuResult.data[0].tenant_id);
-      return false;
-    }
-
-    console.log('[AccessControl] show_regions raw value:', tResult.data[0].show_regions, 'type:', typeof tResult.data[0].show_regions);
-    return tResult.data[0].show_regions === true;
+    console.log('[AccessControl] show_regions raw value:', result.data[0].show_regions, 'type:', typeof result.data[0].show_regions);
+    return result.data[0].show_regions === true;
   } catch (error) {
     console.error('[AccessControl] Error checking show_regions:', error.message);
     return false;
@@ -352,7 +331,7 @@ async function getAllowedProjectCodesForUser(userId) {
   }
 }
 
-// Cache for central auth UUID → public.users UUID mapping (avoids repeated lookups)
+// Cache for central auth UUID → public.users UUID mapping (30-minute TTL)
 const _userIdMappingCache = new Map();
 const USER_ID_MAPPING_CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
 
@@ -362,38 +341,50 @@ const USER_ID_MAPPING_CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
  * user_roles and user_customers reference public.users.id, so we need the old UUID for those queries.
  */
 async function resolveEffectiveUserId(userId, userEmail) {
-  // Check mapping cache first (no TTL — mapping never changes)
+  // Check mapping cache first (with TTL)
   const cached = _userIdMappingCache.get(userId);
   if (cached && (Date.now() - cached.ts) < USER_ID_MAPPING_CACHE_TTL_MS) return cached.value;
 
-  // Single query: check if userId exists in user_roles OR user_customers, and also look up by email
+  // Quick check: does this userId exist in user_roles? If yes, no mapping needed.
   try {
-    const sql = `
-      SELECT
-        (EXISTS(SELECT 1 FROM user_roles WHERE user_id = $1 LIMIT 1)
-         OR EXISTS(SELECT 1 FROM user_customers WHERE user_id = $1 LIMIT 1)) as id_exists,
-        (SELECT id FROM users WHERE LOWER(email) = LOWER($2) LIMIT 1) as email_user_id
-    `;
-    const result = await executeDirectSQL(sql, [userId, userEmail || '']);
-
-    if (result.data && result.data.length > 0) {
-      const row = result.data[0];
-
-      // If userId exists in roles/customers, use it directly
-      if (row.id_exists) {
-        _userIdMappingCache.set(userId, { value: userId, ts: Date.now() });
-        return userId;
-      }
-
-      // Otherwise use the email-mapped UUID
-      if (row.email_user_id && row.email_user_id !== userId) {
-        console.log(`[AccessControl] Resolved user ID: ${userId} → ${row.email_user_id} (via email ${userEmail})`);
-        _userIdMappingCache.set(userId, { value: row.email_user_id, ts: Date.now() });
-        return row.email_user_id;
-      }
+    const checkSql = `SELECT 1 FROM user_roles WHERE user_id = $1 LIMIT 1`;
+    const checkResult = await executeDirectSQL(checkSql, [userId]);
+    if (checkResult.data && checkResult.data.length > 0) {
+      _userIdMappingCache.set(userId, { value: userId, ts: Date.now() });
+      return userId;
     }
   } catch (e) {
-    console.warn('[AccessControl] Error resolving effective user ID:', e.message);
+    // Continue to email lookup
+  }
+
+  // Also check user_customers
+  try {
+    const checkSql = `SELECT 1 FROM user_customers WHERE user_id = $1 LIMIT 1`;
+    const checkResult = await executeDirectSQL(checkSql, [userId]);
+    if (checkResult.data && checkResult.data.length > 0) {
+      _userIdMappingCache.set(userId, { value: userId, ts: Date.now() });
+      return userId;
+    }
+  } catch (e) {
+    // Continue to email lookup
+  }
+
+  // No roles/customers found with this UUID — look up old UUID via email in public.users
+  if (userEmail) {
+    try {
+      const sql = `SELECT id FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1`;
+      const result = await executeDirectSQL(sql, [userEmail]);
+      if (result.data && result.data.length > 0) {
+        const oldId = result.data[0].id;
+        if (oldId !== userId) {
+          console.log(`[AccessControl] Resolved user ID: ${userId} → ${oldId} (via email ${userEmail})`);
+          _userIdMappingCache.set(userId, { value: oldId, ts: Date.now() });
+          return oldId;
+        }
+      }
+    } catch (e) {
+      console.warn('[AccessControl] Error resolving effective user ID:', e.message);
+    }
   }
 
   // No mapping found — use the original userId
@@ -440,7 +431,8 @@ async function loadUserAccessData(userId, userEmail = null) {
       zoneNames: [],
       customerIds: [],
       projectCodes: [],
-      timezone
+      timezone,
+      effectiveUserId
     };
     if (DEBUG) console.log(`[AccessControl] User ${userId} is ADMIN - full access`);
     _accessCache.set(userId, { data: accessData, timestamp: now });
@@ -510,6 +502,7 @@ async function loadUserAccessData(userId, userEmail = null) {
     if (DEBUG) console.log(`[AccessControl] User ${userId} has NO ACCESS`);
   }
 
+  accessData.effectiveUserId = effectiveUserId;
   _accessCache.set(userId, { data: accessData, timestamp: now });
   return accessData;
 }
@@ -544,9 +537,10 @@ async function authenticate(req, res, next) {
       });
     }
 
-    // Extract token from "Bearer <token>" (scheme is case-insensitive per RFC 7235)
-    const bearerMatch = authHeader.match(/^\s*Bearer\s+(.+?)\s*$/i);
-    const token = bearerMatch ? bearerMatch[1] : authHeader.trim();
+    // Extract token from "Bearer <token>"
+    const token = authHeader.startsWith('Bearer ')
+      ? authHeader.slice(7)
+      : authHeader;
 
     if (!token) {
       return res.status(401).json({
@@ -581,6 +575,7 @@ async function authenticate(req, res, next) {
     // Attach user data with access control info - matching web app structure
     req.user = {
       id: decoded.id,
+      effectiveUserId: accessData.effectiveUserId || decoded.id,  // Mapped ID for FK-compatible queries
       email: decoded.email || '',
       phone: decoded.phone || '',
       role: decoded.role || 'authenticated',

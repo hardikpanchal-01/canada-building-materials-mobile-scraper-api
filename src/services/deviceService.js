@@ -18,25 +18,25 @@ const VALID_DEVICE_TYPES = ['android', 'ios', 'web'];
  */
 async function retryWithBackoff(fn, maxRetries = MAX_RETRIES, shouldRetry = null) {
   let lastError = null;
-
+  
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       return await fn();
     } catch (error) {
       lastError = error;
-
+      
       // Check if we should retry this error
       if (shouldRetry && !shouldRetry(error)) {
         throw error;
       }
-
+      
       // Don't retry validation errors or duplicate constraint violations
-      if (error.message?.includes('validation') ||
+      if (error.message?.includes('validation') || 
           error.message?.includes('duplicate') ||
           error.code === '23505') { // PostgreSQL unique violation
         throw error;
       }
-
+      
       // If not the last attempt, wait before retrying
       if (attempt < maxRetries) {
         const delay = RETRY_DELAY_BASE * attempt; // Exponential backoff: 1s, 2s, 3s
@@ -46,7 +46,7 @@ async function retryWithBackoff(fn, maxRetries = MAX_RETRIES, shouldRetry = null
       }
     }
   }
-
+  
   throw lastError || new Error('Operation failed after all retries');
 }
 
@@ -81,7 +81,7 @@ function validateDeviceToken(deviceToken) {
  */
 function validateAndSanitizeDeviceInfo(deviceInfo) {
   const sanitized = {};
-
+  
   // Validate device_type
   if (deviceInfo.device_type) {
     const deviceType = deviceInfo.device_type.toLowerCase().trim();
@@ -91,7 +91,7 @@ function validateAndSanitizeDeviceInfo(deviceInfo) {
       throw new Error(`Invalid device_type. Must be one of: ${VALID_DEVICE_TYPES.join(', ')}`);
     }
   }
-
+  
   // Sanitize string fields (prevent XSS, limit length)
   const stringFields = ['device_name', 'device_model', 'os_version', 'app_version'];
   stringFields.forEach(field => {
@@ -105,7 +105,7 @@ function validateAndSanitizeDeviceInfo(deviceInfo) {
       sanitized[field] = value || null;
     }
   });
-
+  
   return sanitized;
 }
 
@@ -132,18 +132,18 @@ async function registerOrUpdateDevice(userId, deviceInfo) {
     if (!deviceInfo.device_token) {
       throw new Error('device_token is required');
     }
-
+    
     // Validate device token format
     if (!validateDeviceToken(deviceInfo.device_token)) {
       throw new Error('Invalid device_token format');
     }
-
+    
     // Validate and sanitize device info
     const sanitized = validateAndSanitizeDeviceInfo(deviceInfo);
-
+    
     // Use device_token as device_id if not provided
     const deviceId = deviceInfo.device_id || deviceInfo.device_token;
-
+    
     const now = new Date().toISOString();
 
     // Check if device_token already exists (may have duplicates, so use limit(1))
@@ -158,16 +158,16 @@ async function registerOrUpdateDevice(userId, deviceInfo) {
         throw new Error(`Error checking device: ${checkError.message}`);
       }
     };
-
+    
     const existingDevice = await retryWithBackoff(checkDevice);
-
+    
     // If device_token exists, check if it belongs to a different user (security check)
     if (existingDevice && existingDevice.user_id !== userId) {
       console.warn(`⚠️  Security: Device token ${deviceInfo.device_token.substring(0, 20)}... is being reused by different user. Original user: ${existingDevice.user_id}, New user: ${userId}`);
       // Log security event but allow update (token refresh scenario)
       // The token will be updated to the new user
     }
-
+    
     const deviceData = {
       user_id: userId,
       device_token: deviceInfo.device_token.trim(),
@@ -279,7 +279,7 @@ async function registerOrUpdateDevice(userId, deviceInfo) {
       result = await retryWithBackoff(insertDevice);
       console.log(`✅ Device registered: ${deviceInfo.device_token.substring(0, 20)}... for user ${userId}`);
     }
-
+    
     return result;
   } catch (error) {
     console.error('❌ Device registration error:', error.message);
@@ -297,7 +297,7 @@ async function deactivateDeviceToken(deviceToken) {
     if (!deviceToken) {
       throw new Error('device_token is required');
     }
-
+    
     const deactivate = async () => {
       try {
         const result = await executeDirectSQL(
@@ -309,15 +309,15 @@ async function deactivateDeviceToken(deviceToken) {
         throw new Error(`Error deactivating device: ${error.message}`);
       }
     };
-
+    
     const success = await retryWithBackoff(deactivate);
-
+    
     if (success) {
       console.log(`✅ Device token deactivated: ${deviceToken.substring(0, 20)}...`);
     } else {
       console.log(`⚠️  Device token not found for deactivation: ${deviceToken.substring(0, 20)}...`);
     }
-
+    
     return success;
   } catch (error) {
     console.error('❌ Error deactivating device token:', error.message);
@@ -336,7 +336,7 @@ async function deactivateUserDeviceToken(userId, deviceToken) {
     if (!userId || !deviceToken) {
       throw new Error('user_id and device_token are required');
     }
-
+    
     // Verify token belongs to user before deactivating
     let devices = null;
     try {
@@ -352,7 +352,7 @@ async function deactivateUserDeviceToken(userId, deviceToken) {
     if (!devices || devices.length === 0) {
       throw new Error('Device token not found or does not belong to user');
     }
-
+    
     return await deactivateDeviceToken(deviceToken);
   } catch (error) {
     console.error('❌ Error deactivating user device token:', error.message);
@@ -370,7 +370,7 @@ async function deactivateAllUserDevices(userId) {
     if (!userId) {
       throw new Error('user_id is required');
     }
-
+    
     const deactivate = async () => {
       try {
         const result = await executeDirectSQL(
@@ -382,10 +382,10 @@ async function deactivateAllUserDevices(userId) {
         throw new Error(`Error deactivating devices: ${error.message}`);
       }
     };
-
+    
     const count = await retryWithBackoff(deactivate);
     console.log(`✅ Deactivated ${count} device(s) for user ${userId}`);
-
+    
     return count;
   } catch (error) {
     console.error('❌ Error deactivating all user devices:', error.message);
@@ -419,7 +419,7 @@ async function getUserDevices(userId) {
     if (!userId) {
       throw new Error('user_id is required');
     }
-
+    
     const fetchDevices = async () => {
       try {
         const result = await executeDirectSQL(
@@ -431,7 +431,7 @@ async function getUserDevices(userId) {
         throw new Error(`Error fetching devices: ${error.message}`);
       }
     };
-
+    
     return await retryWithBackoff(fetchDevices);
   } catch (error) {
     console.error('❌ Error fetching user devices:', error.message);
@@ -442,14 +442,14 @@ async function getUserDevices(userId) {
 /**
  * Get device tokens for a user (for push notifications).
  *
- * Returns AT MOST ONE token -- the most recently active one. Multiple
+ * Returns AT MOST ONE token — the most recently active one. Multiple
  * rows for the same physical phone accumulate in user_devices over
  * time (FCM token refresh, app reinstall, tenant-switch re-registering
  * the token, occasionally a stamped device_type that doesn't match the
  * physical platform). Without this collapse, push fans out to every
  * surviving row and Firebase delivers each one to whichever installation
- * the token actually routes to -- multiple of which can be the same
- * physical phone -- so the user sees N banners for one logical message.
+ * the token actually routes to — multiple of which can be the same
+ * physical phone — so the user sees N banners for one logical message.
  *
  * Trade-off: a user who genuinely runs the app on two devices (e.g. an
  * Android phone *and* an iPhone for the same account) will only get the
@@ -495,7 +495,7 @@ async function batchGetUserDeviceTokens(userIds) {
     }
 
     // Collapse to at most one token per user (most recently active).
-    // See getUserDeviceTokens for the rationale -- keeps push fan-out
+    // See getUserDeviceTokens for the rationale — keeps push fan-out
     // from hitting stale tokens that still resolve to the same physical
     // phone (which can happen even across rows stamped with a different
     // device_type if the column was set incorrectly during an old test
@@ -531,7 +531,7 @@ async function batchDeactivateTokens(deviceTokens) {
     if (!Array.isArray(deviceTokens) || deviceTokens.length === 0) {
       return 0;
     }
-
+    
     // Process in batches of 100 to avoid query size limits
     const batchSize = 100;
     let totalDeactivated = 0;
@@ -550,11 +550,11 @@ async function batchDeactivateTokens(deviceTokens) {
           throw new Error(`Error batch deactivating tokens: ${error.message}`);
         }
       };
-
+      
       const count = await retryWithBackoff(deactivate);
       totalDeactivated += count;
     }
-
+    
     console.log(`✅ Batch deactivated ${totalDeactivated} device token(s)`);
     return totalDeactivated;
   } catch (error) {
@@ -573,14 +573,14 @@ async function cleanupInactiveTokens(daysOld = TOKEN_CLEANUP_DAYS) {
     const cutoffDate = new Date();
     cutoffDate.setDate(cutoffDate.getDate() - daysOld);
     const cutoffISO = cutoffDate.toISOString();
-
+    
     console.log(`🧹 Starting cleanup of inactive tokens older than ${daysOld} days (before ${cutoffISO})`);
-
+    
     // Process in batches to avoid large deletions
     const batchSize = 1000;
     let totalDeleted = 0;
     let hasMore = true;
-
+    
     while (hasMore) {
       const cleanup = async () => {
         // First, get IDs of tokens to delete
@@ -614,15 +614,15 @@ async function cleanupInactiveTokens(daysOld = TOKEN_CLEANUP_DAYS) {
 
         return ids.length;
       };
-
+      
       const deleted = await retryWithBackoff(cleanup);
       totalDeleted += deleted;
-
+      
       if (deleted < batchSize) {
         hasMore = false;
       }
     }
-
+    
     console.log(`✅ Cleanup complete: Deleted ${totalDeleted} inactive token(s)`);
     return totalDeleted;
   } catch (error) {

@@ -1,6 +1,6 @@
 -- ============================================================
 -- scraper_email_logs table
--- Run this on EACH tenant's Postgres database
+-- Run this on EACH tenant's the database database
 -- Tracks every comparison run: sent, skipped, or failed
 -- ============================================================
 
@@ -40,7 +40,7 @@ CREATE INDEX IF NOT EXISTS idx_scraper_email_logs_created_at
 CREATE INDEX IF NOT EXISTS idx_scraper_email_logs_status
   ON scraper_email_logs (status, created_at DESC);
 
--- Grant access to PostgREST gateway roles (required for REST API access)
+-- Grant access to the database roles (required for PostgREST API access)
 GRANT ALL ON scraper_email_logs TO anon;
 GRANT ALL ON scraper_email_logs TO authenticated;
 GRANT ALL ON scraper_email_logs TO service_role;

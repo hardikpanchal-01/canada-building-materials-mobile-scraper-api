@@ -362,6 +362,81 @@ async function verifyPhoneOtp(email, otp) {
 }
 
 /**
+ * Upsert the signup user into public.users and link QR-enabled tenants.
+ * Used by the create path of setPasswordAndComplete.
+ */
+async function syncNewUserToAuthTenant(normalizedEmail, password, record, now) {
+  const bcryptHash = await hashPassword(password);
+
+  const upsertResult = await executeAuthSQL(
+    `INSERT INTO public.users
+       (email, password_hash, full_name, phone_number, phone_country_code, title,
+        user_role, active, email_verified_at, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, 'user', false, $7, $7, $7)
+     ON CONFLICT (email) DO UPDATE SET
+       password_hash = EXCLUDED.password_hash,
+       full_name = EXCLUDED.full_name,
+       phone_number = EXCLUDED.phone_number,
+       phone_country_code = EXCLUDED.phone_country_code,
+       title = EXCLUDED.title,
+       updated_at = EXCLUDED.updated_at
+     RETURNING id`,
+    [normalizedEmail, bcryptHash, record.full_name, record.phone_number,
+     record.phone_country_code, record.title, now]
+  );
+
+  if (upsertResult.data.length > 0) {
+    const authUserId = upsertResult.data[0].id;
+
+    // Link to all QR-enabled tenants
+    const qrTenantsResult = await executeAuthSQL(
+      `SELECT id FROM public.tenants
+       WHERE qr_enabled = true AND status = 'active' AND deleted_at IS NULL`
+    );
+
+    for (const t of qrTenantsResult.data) {
+      try {
+        await executeAuthSQL(
+          `INSERT INTO public.tenant_users (tenant_id, user_id, role, status, created_at, updated_at)
+           VALUES ($1, $2, 'member', 'active', $3, $3)`,
+          [t.id, authUserId, now]
+        );
+      } catch (tuError) {
+        console.error('[Signup] public.tenant_users insert error:', tuError.message);
+      }
+    }
+  }
+}
+
+/**
+ * Update the existing signup user in public.users (update path).
+ */
+async function syncExistingUserToAuthTenant(normalizedEmail, password, record, now) {
+  const bcryptHash = await hashPassword(password);
+
+  await executeAuthSQL(
+    `UPDATE public.users
+     SET password_hash = $1, phone_number = $2, phone_country_code = $3,
+         full_name = $4, updated_at = $5
+     WHERE email = $6`,
+    [bcryptHash, record.phone_number, record.phone_country_code,
+     record.full_name, now, normalizedEmail]
+  );
+}
+
+/**
+ * Count public.users rows for a given email (duplicate detection).
+ * Returns null when the check could not run.
+ */
+async function countAuthTenantUsers(normalizedEmail) {
+  const result = await executeAuthSQL(
+    'SELECT count(*)::int AS count FROM public.users WHERE email = $1',
+    [normalizedEmail]
+  );
+  return result.data[0].count;
+}
+
+/**
  * Step 5: Set password and complete registration
  *
  * Creates the real user in auth.users + public.users with the user-chosen password.
@@ -415,19 +490,16 @@ async function setPasswordAndComplete(email, password) {
     return { success: false, error: 'This email is associated with multiple accounts. Please contact support.', code: 'DUPLICATE_EMAIL' };
   }
 
-  // 2. Check auth_tenant.users
-  const tenantResult = await executeAuthSQL('SELECT id FROM users WHERE email = $1', [normalizedEmail]);
-
-  if (!tenantResult.success) {
-    console.error('[Signup] auth_tenant.users query failed:', tenantResult.error);
+  // 2. Check public.users
+  try {
+    const tenantUserCount = await countAuthTenantUsers(normalizedEmail);
+    if (tenantUserCount > 1) {
+      console.error('[Signup] Duplicate email in public.users:', normalizedEmail, 'count:', tenantUserCount);
+      return { success: false, error: 'This email is associated with multiple accounts. Please contact support.', code: 'DUPLICATE_EMAIL' };
+    }
+  } catch (tenantQueryErr) {
+    console.error('[Signup] public.users query failed:', tenantQueryErr.message);
     return { success: false, error: 'Unable to verify account. Please try again.', code: 'DB_QUERY_FAILED' };
-  }
-
-  const tenantUsers = tenantResult.data;
-
-  if (tenantUsers && tenantUsers.length > 1) {
-    console.error('[Signup] Duplicate email in auth_tenant.users:', normalizedEmail, 'count:', tenantUsers.length);
-    return { success: false, error: 'This email is associated with multiple accounts. Please contact support.', code: 'DUPLICATE_EMAIL' };
   }
 
   // 3. Check auth.users — also save the match for reuse
@@ -496,17 +568,9 @@ async function setPasswordAndComplete(email, password) {
       return { success: false, error: 'Failed to update password. Please try again.', code: 'AUTH_UPDATE_FAILED' };
     }
 
-    // Update auth_tenant.users
+    // Update public.users
     try {
-      const bcryptHash = await hashPassword(password);
-      const atUpdateResult = await executeAuthSQL(
-        'UPDATE users SET password_hash = $1, phone_number = $2, phone_country_code = $3, full_name = $4, updated_at = $5 WHERE email = $6',
-        [bcryptHash, record.phone_number, record.phone_country_code, record.full_name, now, normalizedEmail]
-      );
-
-      if (!atUpdateResult.success) {
-        console.error('[Signup] auth_tenant.users update error:', atUpdateResult.error);
-      }
+      await syncExistingUserToAuthTenant(normalizedEmail, password, record, now);
     } catch (authTenantErr) {
       console.error('[Signup] auth_tenant sync error:', authTenantErr.message);
     }
@@ -636,59 +700,7 @@ async function setPasswordAndComplete(email, password) {
 
   // Create or update user in auth_tenant database (used by mobile login)
   try {
-    const bcryptHash = await hashPassword(password);
-
-    // Upsert into auth_tenant.users
-    const authUserResult = await executeAuthSQL(
-      `INSERT INTO users (email, password_hash, full_name, phone_number, phone_country_code, title, user_role, active, email_verified_at, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-       ON CONFLICT (email) DO UPDATE SET
-         password_hash = EXCLUDED.password_hash,
-         full_name = EXCLUDED.full_name,
-         phone_number = EXCLUDED.phone_number,
-         phone_country_code = EXCLUDED.phone_country_code,
-         title = EXCLUDED.title,
-         user_role = EXCLUDED.user_role,
-         active = EXCLUDED.active,
-         email_verified_at = EXCLUDED.email_verified_at,
-         updated_at = EXCLUDED.updated_at
-       RETURNING id`,
-      [normalizedEmail, bcryptHash, record.full_name, record.phone_number, record.phone_country_code, record.title, 'user', false, now, now, now]
-    );
-
-    if (!authUserResult.success) {
-      console.error('[Signup] auth_tenant.users insert error:', authUserResult.error);
-    } else if (authUserResult.data?.[0]) {
-      const atUser = authUserResult.data[0];
-      // Link to all QR-enabled tenants
-      const qrTenantsResult = await executeAuthSQL(
-        'SELECT id FROM tenants WHERE qr_enabled = $1 AND status = $2 AND deleted_at IS NULL',
-        [true, 'active']
-      );
-
-      const qrTenants = qrTenantsResult.success ? qrTenantsResult.data : [];
-
-      if (qrTenants && qrTenants.length > 0) {
-        const valuePlaceholders = [];
-        const params = [];
-        let paramIdx = 1;
-
-        qrTenants.forEach(t => {
-          valuePlaceholders.push(`($${paramIdx}, $${paramIdx + 1}, $${paramIdx + 2}, $${paramIdx + 3}, $${paramIdx + 4}, $${paramIdx + 5})`);
-          params.push(t.id, atUser.id, 'member', 'active', now, now);
-          paramIdx += 6;
-        });
-
-        const tuResult = await executeAuthSQL(
-          `INSERT INTO tenant_users (tenant_id, user_id, role, status, created_at, updated_at) VALUES ${valuePlaceholders.join(', ')}`,
-          params
-        );
-
-        if (!tuResult.success) {
-          console.error('[Signup] auth_tenant.tenant_users insert error:', tuResult.error);
-        }
-      }
-    }
+    await syncNewUserToAuthTenant(normalizedEmail, password, record, now);
   } catch (authTenantErr) {
     // Non-fatal: user is created in main DB, auth_tenant sync can be retried
     console.error('[Signup] auth_tenant sync error:', authTenantErr.message);

@@ -1,20 +1,10 @@
 /**
- * Chat data endpoints — rooms, messages, send, upload.
- * Queries PostgreSQL directly via postgresExecutor.
+ * Chat data endpoints — rooms, messages, send.
+ * Queries PostgreSQL directly.
  */
-const fs = require('fs');
-const fsp = require('fs').promises;
-const path = require('path');
+const getPresignedUrl = async (url) => url;
 const { executeDirectSQL } = require('../utils/postgresExecutor');
-
-// Local file upload directory (no S3 configured for CBM yet)
-const LOCAL_UPLOADS_DIR = path.join(__dirname, '..', '..', 'public', 'uploads', 'chat-files');
-fs.mkdirSync(LOCAL_UPLOADS_DIR, { recursive: true });
-
-function localUrlFor(key) {
-  const port = process.env.PORT || 5000;
-  return `http://localhost:${port}/uploads/chat-files/${key}`;
-}
+const { uploadChatFile } = require('../services/database/s3Storage');
 
 async function getRooms(req, res) {
   try {
@@ -79,7 +69,13 @@ async function getMessages(req, res) {
     params.push(limit);
 
     const result = await executeDirectSQL(query, params);
-    return res.json({ success: true, data: result.data || [] });
+    const messages = result.data || [];
+    await Promise.all(messages.map(async (msg) => {
+      if (msg.sender_avatar_url) {
+        msg.sender_avatar_url = await getPresignedUrl(msg.sender_avatar_url);
+      }
+    }));
+    return res.json({ success: true, data: messages });
   } catch (error) {
     return res.status(500).json({ success: false, message: error.message });
   }
@@ -95,13 +91,7 @@ async function sendMessage(req, res) {
       return res.status(400).json({ success: false, message: 'order_id and sender_id are required' });
     }
 
-    // Validate provided chat_id exists, otherwise auto-resolve
-    if (chat_id) {
-      const exists = await executeDirectSQL(
-        `SELECT id FROM order_chats WHERE id = $1 LIMIT 1`, [chat_id]
-      ).catch(() => null);
-      if (!exists?.data?.length) chat_id = null;
-    }
+    // Auto-resolve chat_id if not provided
     if (!chat_id) {
       // Try RPC first
       const rpcResult = await executeDirectSQL(
@@ -181,15 +171,13 @@ async function uploadFile(req, res) {
       return res.status(400).json({ success: false, message: 'No file provided' });
     }
     const orderId = req.body.order_id || 'unknown';
-    const ext = req.file.originalname.split('.').pop().toLowerCase();
-    const key = `${orderId}/${Date.now()}_${Math.random().toString(36).substring(2, 8)}.${ext}`;
-
-    const filePath = path.join(LOCAL_UPLOADS_DIR, key);
-    await fsp.mkdir(path.dirname(filePath), { recursive: true });
-    await fsp.writeFile(filePath, req.file.buffer);
-
-    const publicUrl = localUrlFor(key);
-    return res.json({ success: true, data: { url: publicUrl, path: key } });
+    const { path: filePath, publicUrl } = await uploadChatFile(
+      orderId,
+      req.file.buffer,
+      req.file.mimetype,
+      req.file.originalname
+    );
+    return res.json({ success: true, data: { url: publicUrl, path: filePath } });
   } catch (error) {
     return res.status(500).json({ success: false, message: error.message });
   }

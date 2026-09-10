@@ -9,7 +9,7 @@
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
-import { dbServer } from "./_dataClient.mjs";
+import { db } from "./_db.mjs";
 
 const auditStorage = new AsyncLocalStorage();
 
@@ -65,7 +65,7 @@ export function withAuditLog(
       throw err;
     } finally {
       const latencyMs = Date.now() - startedAt;
-      void dbServer
+      void db
         .from("ai_audit_log")
         .insert({
           user_id: ctx.userId ?? null,

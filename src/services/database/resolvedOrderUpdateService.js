@@ -1,11 +1,11 @@
 /**
  * Revalidated Order Update Service
  *
- * After re-validation via Command Cloud API, this service updates confirmed mismatched
+ * After re-validation via ConcreteGo API, this service updates confirmed mismatched
  * orders in the Truckast database:
  * - Confirmed orders: API differs from Truckast (update Truckast to match API value)
  * - Resolved orders: API matches Truckast (no update needed, DB already correct)
- * This ensures Truckast DB stays in sync with Command Cloud as the source of truth.
+ * This ensures Truckast DB stays in sync with ConcreteGo as the source of truth.
  *
  * Field-to-table mapping:
  *   orders table:        customer_name, delivery_addr1, current_status, removed
@@ -239,7 +239,7 @@ async function bulkUpdateOrderProducts(updates) {
           AND o.order_date >= $2::date
           AND o.order_date < ($2::date + INTERVAL '1 day')
           AND UPPER(TRIM(op.item_code)) LIKE UPPER(TRIM($${values.length + 3})) || '%'
-          AND UPPER(op.order_qty_unit) = 'YDQ'
+          AND op.order_qty_unit = 'YDQ'
           AND op.is_mix = true
         RETURNING op.id
       `;
@@ -254,7 +254,7 @@ async function bulkUpdateOrderProducts(updates) {
           AND UPPER(TRIM(o.order_code)) = UPPER(TRIM($1))
           AND o.order_date >= $2::date
           AND o.order_date < ($2::date + INTERVAL '1 day')
-          AND UPPER(op.order_qty_unit) = 'YDQ'
+          AND op.order_qty_unit = 'YDQ'
           AND op.is_mix = true
         RETURNING op.id
       `;
@@ -313,7 +313,7 @@ async function bulkUpdateOrderSchedules(updates) {
           AND o.order_date >= $2::date
           AND o.order_date < ($2::date + INTERVAL '1 day')
           AND UPPER(TRIM(op.item_code)) LIKE UPPER(TRIM($${values.length + 3})) || '%'
-          AND UPPER(op.order_qty_unit) = 'YDQ'
+          AND op.order_qty_unit = 'YDQ'
           AND op.is_mix = true
         RETURNING ops.id
       `;
@@ -328,7 +328,7 @@ async function bulkUpdateOrderSchedules(updates) {
           AND UPPER(TRIM(o.order_code)) = UPPER(TRIM($1))
           AND o.order_date >= $2::date
           AND o.order_date < ($2::date + INTERVAL '1 day')
-          AND UPPER(op.order_qty_unit) = 'YDQ'
+          AND op.order_qty_unit = 'YDQ'
           AND op.is_mix = true
         RETURNING ops.id
       `;
@@ -521,8 +521,8 @@ async function attachAfterUpdateValues(revalidationResults) {
 }
 
 /**
- * Transform a Command Cloud API boolean value to PostgreSQL boolean.
- * Command Cloud returns 'true'/'false' strings or actual booleans.
+ * Transform a ConcreteGo API boolean value to PostgreSQL boolean.
+ * ConcreteGo returns 'true'/'false' strings or actual booleans.
  *
  * @param {*} value - The value to transform
  * @returns {boolean} PostgreSQL-compatible boolean
@@ -536,7 +536,7 @@ function transformBoolean(value) {
 /**
  * Insert resolved missing orders into the Truckast database.
  *
- * For each missing order that was found in the Command Cloud API, inserts the order
+ * For each missing order that was found in the ConcreteGo API, inserts the order
  * along with its products and schedules into the orders, order_products, and
  * order_product_schedules tables. Uses ON CONFLICT DO UPDATE (upsert) to handle
  * edge cases where the order may already partially exist.

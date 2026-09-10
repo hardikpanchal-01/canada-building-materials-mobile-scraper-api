@@ -103,11 +103,11 @@ async function getTodayOverview(dateStr, exclusionPatterns = [], userAccess = nu
         o.removed,
         o.remove_reason_code,
         COALESCE(o.current_status, 1) as current_status,
-        SUM(CASE WHEN op.order_qty_unit IN ('m3', 'M3', 'CY', 'YDQ') THEN COALESCE(op.order_qty, 0) ELSE 0 END) as ordered_qty,
-        SUM(CASE WHEN op.order_qty_unit IN ('m3', 'M3', 'CY', 'YDQ') THEN COALESCE(op.delv_qty, 0) ELSE 0 END) as delivered_qty
+        SUM(COALESCE(op.order_qty, 0)) as ordered_qty,
+        SUM(COALESCE(op.delv_qty, 0)) as delivered_qty
       FROM orders o
-      -- Any order with a product line (mirrors web getAllSummaryData; not is_mix-gated).
       INNER JOIN order_products op ON op.order_id = o.order_id
+        AND (op.order_qty_unit = 'YDQ' AND op.is_mix = true)
       WHERE ${whereConditions.join(' AND ')}
       GROUP BY o.order_id, o.removed, o.remove_reason_code, o.current_status
     ),

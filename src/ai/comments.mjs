@@ -1,15 +1,15 @@
 /** Per-widget comments on saved dashboards (ported from /api/ai/dashboards/[id]/comments). */
-import { dbServer } from './_dataClient.mjs';
+import { db } from './_db.mjs';
 
 async function canReadDashboard(userId, id) {
-  const { data: dash } = await dbServer
+  const { data: dash } = await db
     .from('ai_dashboards')
     .select('user_id, is_public')
     .eq('id', id)
     .single();
   if (!dash) return false;
   if (dash.user_id === userId || dash.is_public) return true;
-  const { data: share } = await dbServer
+  const { data: share } = await db
     .from('ai_dashboard_shares')
     .select('id')
     .eq('dashboard_id', id)
@@ -22,7 +22,7 @@ export async function listComments(userId, id, widgetId) {
   if (!(await canReadDashboard(userId, id))) {
     throw Object.assign(new Error('Not found'), { status: 404 });
   }
-  let q = dbServer
+  let q = db
     .from('ai_widget_comments')
     .select('id, widget_id, user_id, body, parent_id, created_at')
     .eq('dashboard_id', id)
@@ -41,7 +41,7 @@ export async function addComment(userId, id, { widgetId, body, parentId } = {}) 
     throw Object.assign(new Error('widgetId and body required'), { status: 400 });
   }
   if (body.length > 4000) throw Object.assign(new Error('body too long'), { status: 400 });
-  const { data, error } = await dbServer
+  const { data, error } = await db
     .from('ai_widget_comments')
     .insert({
       dashboard_id: id,
@@ -60,7 +60,7 @@ export async function editComment(userId, commentId, body) {
   if (!body || body.length > 4000) {
     throw Object.assign(new Error('body required (≤4000 chars)'), { status: 400 });
   }
-  const { data, error } = await dbServer
+  const { data, error } = await db
     .from('ai_widget_comments')
     .update({ body })
     .eq('id', commentId)
@@ -72,7 +72,7 @@ export async function editComment(userId, commentId, body) {
 }
 
 export async function deleteComment(userId, commentId) {
-  const { error } = await dbServer
+  const { error } = await db
     .from('ai_widget_comments')
     .delete()
     .eq('id', commentId)

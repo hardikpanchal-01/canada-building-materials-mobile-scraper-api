@@ -1,6 +1,6 @@
 /**
  * KPI Registry — canonical mapping from natural-language KPI requests
- * to the exact Postgres query that answers them.
+ * to the exact SQL query that answers them.
  *
  * Replaces the 300-line prose schema in system-prompt.ts with structured,
  * type-checked, schema-verified entries. Every column reference here was

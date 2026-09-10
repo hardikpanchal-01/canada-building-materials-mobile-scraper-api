@@ -89,14 +89,14 @@ function formatStatusName(status) {
 }
 
 /**
- * Get only the difference rows where Command Cloud (scraped) and API (fresh) values
+ * Get only the difference rows where ConcreteGo (scraped) and API (fresh) values
  * actually differ. Used to hide orders that have no "real" mismatch (CG vs API)
  * and to show only these rows in the email.
  *
  * @param {object} revalidatedOrder - Order object from revalidationResults.orders
  * @returns {Array} Subset of differences where scraped_value !== fresh_system_value (formatted)
  */
-function getDisplayDifferencesWhereCommandCloudDiffersFromApi(revalidatedOrder) {
+function getDisplayDifferencesWhereConcreteGoDiffersFromApi(revalidatedOrder) {
   if (!revalidatedOrder || !Array.isArray(revalidatedOrder.differences)) {
     return [];
   }
@@ -105,6 +105,14 @@ function getDisplayDifferencesWhereCommandCloudDiffersFromApi(revalidatedOrder) 
     // If we have no fresh API value, keep this difference visible
     if (diff.fresh_system_value === undefined || diff.fresh_system_value === null) {
       return true;
+    }
+    // Quantity fields: ignore differences up to 0.03 (rounding + auto-close padding).
+    if (diff.field === 'ordered_qty' || diff.field === 'delivered_qty') {
+      const a = parseFloat(diff.scraped_value);
+      const b = parseFloat(diff.fresh_system_value);
+      if (!isNaN(a) && !isNaN(b) && Math.round(Math.abs(a - b) * 100) / 100 <= 0.03) {
+        return false; // within tolerance → not a real difference
+      }
     }
     const scrapedFormatted = formatDifferenceValue(diff.field, diff.scraped_value);
     const freshFormatted = formatDifferenceValue(diff.field, diff.fresh_system_value);
@@ -117,16 +125,16 @@ function getDisplayDifferencesWhereCommandCloudDiffersFromApi(revalidatedOrder) 
  * Comparison Results table.
  *
  * Business rule: hide the order only if there are NO displayable differences
- * remaining after filtering out rows where Command Cloud === API.
- * Individual diff rows where Command Cloud === API are already filtered out by
- * getDisplayDifferencesWhereCommandCloudDiffersFromApi — we just need to hide
+ * remaining after filtering out rows where ConcreteGo === API.
+ * Individual diff rows where ConcreteGo === API are already filtered out by
+ * getDisplayDifferencesWhereConcreteGoDiffersFromApi — we just need to hide
  * the order when that filter leaves nothing to show.
  *
  * @param {object} revalidatedOrder - Order object from revalidationResults.orders
  * @returns {boolean} True if the order should be hidden from the email table
  */
 function shouldHideRevalidatedOrderForFreshMatch(revalidatedOrder) {
-  const displayDiffs = getDisplayDifferencesWhereCommandCloudDiffersFromApi(revalidatedOrder);
+  const displayDiffs = getDisplayDifferencesWhereConcreteGoDiffersFromApi(revalidatedOrder);
   return displayDiffs.length === 0;
 }
 
@@ -185,7 +193,7 @@ function formatDifferencesDetailed(differences) {
     return `
       <div style="margin-bottom: 8px;">
         <strong style="color: #495057;">${fieldLabel}:</strong><br/>
-        <span style="color: #dc3545; margin-left: 8px;">Command Cloud: ${scraperValue}</span><br/>
+        <span style="color: #dc3545; margin-left: 8px;">ConcreteGo: ${scraperValue}</span><br/>
         <span style="color: #28a745; margin-left: 8px;">Truckast: ${systemValue}</span>
       </div>
     `;
@@ -204,7 +212,7 @@ function formatRevalidationSection(revalidationResults) {
   const { confirmed_count, resolved_count, revalidated_count, orders } = revalidationResults;
 
   let html = `
-    <div class="section-title">Re-Validation Results (${revalidated_count} order(s) re-checked via Command Cloud API)</div>
+    <div class="section-title">Re-Validation Results (${revalidated_count} order(s) re-checked via ConcreteGo API)</div>
     <table class="summary-cards-table" cellpadding="0" cellspacing="0" border="0" width="100%" style="table-layout: fixed; width: 100%; margin-bottom: 20px;">
       <tr>
         <td width="33%" style="width: 33%; padding: 0 4px 0 0; vertical-align: top;">
@@ -256,7 +264,7 @@ function formatRevalidationSection(revalidationResults) {
     const statusLabel = isResolved ? 'Matched' : 'Mismatched';
     const formattedDate = formatDateToMMDDYYYY(order.order_date);
 
-    // Format differences with Command Cloud vs Truckast values (same as Comparison Results table)
+    // Format differences with ConcreteGo vs Truckast values (same as Comparison Results table)
     let diffsHtml = '';
     if (order.differences && order.differences.length > 0) {
       const diffItems = order.differences.map(diff => {
@@ -273,7 +281,7 @@ function formatRevalidationSection(revalidationResults) {
         return `
           <div style="margin-bottom: 8px;">
             <strong style="color: #495057;">${fieldLabel}:</strong><br/>
-            <span style="color: #dc3545; margin-left: 8px;">Command Cloud: ${concreteGoVal}</span><br/>
+            <span style="color: #dc3545; margin-left: 8px;">ConcreteGo: ${concreteGoVal}</span><br/>
             <span style="color: #28a745; margin-left: 8px;">Truckast: ${truckastVal}</span><br/>
             <span style="color: #0d6efd; margin-left: 8px;">API: ${freshApiVal}</span>${afterUpdateLine}
           </div>
@@ -314,7 +322,7 @@ function formatRevalidationSection(revalidationResults) {
  * @param {object} revalidationResults - Optional re-validation results
  * @param {string} tenantName - Tenant name (e.g. Truckast client)
  * @param {string} [producerName] - Concrete producer name
- * @param {string} [scrapedSystem] - Source system name (e.g. Command Cloud, Command Cloud)
+ * @param {string} [scrapedSystem] - Source system name (e.g. ConcreteGo, Command Cloud)
  * @returns {string} HTML email body
  */
 function formatEmailBody(
@@ -343,7 +351,7 @@ function formatEmailBody(
 
   const effectiveTenantName = tenantName || process.env.TENANT_NAME || 'Truckast';
   const effectiveProducerName = producerName || process.env.PRODUCER_NAME || effectiveTenantName;
-  const effectiveScrapedSystem = scrapedSystem || process.env.SCRAPED_SYSTEM || 'Command Cloud';
+  const effectiveScrapedSystem = scrapedSystem || process.env.SCRAPED_SYSTEM || 'ConcreteGo';
 
   // Whether we have dashboard counts from the DB (matching web app)
   const hasDashboardCounts = dashboard_total != null;
@@ -354,7 +362,7 @@ function formatEmailBody(
     : original_mismatched_count;
 
   // Adjust mismatched count for email display: hide any confirmed orders where
-  // all fields have the same Command Cloud/scraped and API/fresh values. These
+  // all fields have the same ConcreteGo/scraped and API/fresh values. These
   // represent cases where the scraper and fresh API agree, even if Truckast
   // is still different, and should not count as "Mismatched" in the summary
   // cards or Comparison Results table.
@@ -842,8 +850,8 @@ function formatEmailBody(
       const originalExt = originalMismatchedMap.get(revalOrder.order_code) || {};
       const originalSys = originalSystemOrderMap.get(revalOrder.order_code) || {};
 
-      // Format only differences where Command Cloud !== API (same filter as hide rule)
-      const displayDiffs = getDisplayDifferencesWhereCommandCloudDiffersFromApi(revalOrder);
+      // Format only differences where ConcreteGo !== API (same filter as hide rule)
+      const displayDiffs = getDisplayDifferencesWhereConcreteGoDiffersFromApi(revalOrder);
       let diffDetails = '-';
       if (displayDiffs.length > 0) {
         const diffItems = displayDiffs.map(diff => {
@@ -863,7 +871,7 @@ function formatEmailBody(
           return `
             <div style="margin-bottom: 8px;">
               <strong style="color: #495057;">${fieldLabel}:</strong><br/>
-              <span style="color: #dc3545; margin-left: 8px;">Command Cloud: ${concreteGoVal}</span><br/>
+              <span style="color: #dc3545; margin-left: 8px;">ConcreteGo: ${concreteGoVal}</span><br/>
               <span style="color: #28a745; margin-left: 8px;">Truckast: ${truckastVal}</span><br/>
               <span style="color: #0d6efd; margin-left: 8px;">API: ${freshApiVal}</span>${afterUpdateLine}
             </div>
@@ -1076,7 +1084,7 @@ async function sendComparisonEmail(comparisonSummary, fullComparisonResult, reva
   // Tenant / producer configuration and timezone from environment
   const tenantName = process.env.TENANT_NAME || 'Truckast';
   const producerName = process.env.PRODUCER_NAME || tenantName;
-  const scrapedSystem = process.env.SCRAPED_SYSTEM || 'Command Cloud';
+  const scrapedSystem = process.env.SCRAPED_SYSTEM || 'ConcreteGo';
   const businessTimezone = process.env.BUSINESS_TIMEZONE || 'America/Chicago';
 
   // Format date and time in tenant's timezone
@@ -1155,281 +1163,376 @@ async function sendComparisonEmail(comparisonSummary, fullComparisonResult, reva
 }
 
 /**
- * ============================================================================
- * LITE email (Connex extension flow) — fully separate from the main email above.
- * Does NOT touch formatEmailBody / sendComparisonEmail. Slim, problems-only.
- * ============================================================================
+ * Send a "Perfect Order Match" (100% accuracy) email.
+ *
+ * Used for browser-extension batches when the comparison finds NO mismatched and
+ * NO missing orders — a positive confirmation that every scraped order matched the
+ * system, instead of silently skipping the email.
+ *
+ * @param {object} comparisonSummary - The comparison summary (counts)
+ * @returns {Promise<boolean>} True on success
  */
-
-function escHtml(s) {
-  return String(s == null ? "" : s)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}
-
-function liteQty(v) {
-  const n = parseFloat(v);
-  return isNaN(n) ? "—" : String(Math.round(n * 100) / 100);
-}
-
-/**
- * Build the slim lite-comparison email body.
- * Shows Total/Matched/Mismatched/Missing + a single table of only the problem
- * orders (mismatched + missing), Connex vs Truckast for ordered qty + status.
- */
-function formatLiteEmailBody(summary, fullResult, opts = {}) {
-  const tenant = process.env.PRODUCER_NAME || process.env.TENANT_NAME || "Truckast";
-  const dateStr = opts.dateStr || "";
-  const perTab = opts.perTab || null;
-  const total = summary.total_external_orders || 0;
-  const matched = summary.matched_count || 0;
-  const mismatched = summary.mismatched_count || 0;
-  const missing = summary.missing_in_system_count || 0;
-
-  const mism = fullResult.mismatched_orders || [];
-  const miss = fullResult.missing_in_system_orders || [];
-  const problemCount = mism.length + miss.length;
-
-  const card = (label, value, color) => `
-    <td style="padding:0 4px;">
-      <div style="border:1px solid #e0e0e0;border-left:4px solid ${color};border-radius:6px;padding:10px 6px;text-align:center;">
-        <div style="font-size:9px;color:#666;text-transform:uppercase;letter-spacing:.5px;font-weight:600;">${label}</div>
-        <div style="font-size:22px;font-weight:700;color:${color};">${value}</div>
-      </div>
-    </td>`;
-
-  // Optional per-tab breakdown line (Active/Completed/Cancelled), rendered only
-  // when the extension forwarded metadata.perTab.
-  const perTabLine = (() => {
-    if (!perTab || typeof perTab !== "object") return "";
-    const parts = [];
-    for (const k of ["Active", "Completed", "Cancelled"]) {
-      if (perTab[k] !== undefined && perTab[k] !== null) parts.push(`${escHtml(k)} ${escHtml(perTab[k])}`);
-    }
-    return parts.length ? parts.join(" &middot; ") : "";
-  })();
-
-  const tenantLine = `<p style="margin:0 0 4px;font-size:14px;"><strong>Tenant:</strong> ${escHtml(tenant)}</p>`;
-  const providerLine = `<p style="margin:0 0 ${dateStr ? "4px" : "16px"};font-size:14px;"><strong>Provider:</strong> Connex</p>`;
-  const dateLine = dateStr
-    ? `<p style="margin:0 0 16px;font-size:13px;color:#7f8c8d;">${escHtml(dateStr)}</p>`
-    : "";
-
-  const summaryCards = `
-        <table width="100%" style="table-layout:fixed;border-collapse:separate;border-spacing:0;margin-bottom:8px;">
-          <tr>
-            ${card("Total", total, "#2c3e50")}
-            ${card("Matched", matched, "#27ae60")}
-            ${card("Mismatched", mismatched, "#f39c12")}
-            ${card("Missing", missing, "#e74c3c")}
-          </tr>
-        </table>`;
-
-  // ---- 100% Accuracy hero (everything matched) -----------------------------
-  // When there are no mismatched AND no missing orders, send a polished green
-  // "100% Accuracy" email so the client sees a perfect result at a glance.
-  if (problemCount === 0) {
-    return `
-  <!DOCTYPE html>
-  <html><head><meta charset="UTF-8"/></head>
-  <body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;background:#f5f5f5;padding:20px;color:#333;">
-    <div style="max-width:900px;margin:0 auto;background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 2px 4px rgba(0,0,0,.1);">
-      <div style="background:linear-gradient(135deg,#11998e,#38ef7d);color:#fff;padding:32px 20px;text-align:center;">
-        <div style="width:64px;height:64px;line-height:64px;margin:0 auto 12px;border-radius:50%;background:rgba(255,255,255,.2);font-size:36px;font-weight:700;">&#10003;</div>
-        <h1 style="margin:0;font-size:30px;letter-spacing:.5px;">100% Accuracy</h1>
-        <p style="margin:8px 0 0;font-size:15px;opacity:.95;">All ${total} order${total === 1 ? "" : "s"} verified &middot; perfect match</p>
-      </div>
-      <div style="padding:24px;">
-        ${tenantLine}
-        ${providerLine}
-        ${dateLine}
-        ${summaryCards}
-        <div style="margin-top:20px;padding:16px;background:#f1fef9;border:1px solid #6ceaba;border-radius:8px;color:#106a40;font-weight:600;text-align:center;">
-          &#10003; Every Connex order matched ${escHtml(tenant)} exactly on ordered quantity + status.
-        </div>
-        ${perTabLine ? `<div style="font-size:12px;color:#7f8c8d;margin-top:12px;text-align:center;">${perTabLine}</div>` : ""}
-        <div style="margin-top:28px;padding-top:16px;border-top:1px solid #e0e0e0;font-size:12px;color:#7f8c8d;text-align:center;">
-          Automated report &mdash; Connex orders compared on ordered quantity + status.
-        </div>
-      </div>
-    </div>
-  </body></html>`;
-  }
-
-  let rows = "";
-  for (const o of mism) {
-    const ext = o.external_order || o.externalOrder || {};
-    // Render ONLY the fields that actually differ (from order.differences).
-    // A matching field shows "—" (so a status-only mismatch doesn't print a
-    // confusing equal-value Ordered Qty column).
-    const diffs = {};
-    for (const d of (o.differences || [])) diffs[d.field] = d;
-
-    const cell = (field, isQty) => {
-      const d = diffs[field];
-      if (!d) return '<span style="color:#9aa3ad;">—</span>';
-      const cx = isQty ? liteQty(d.external_value) : (escHtml(d.external_value) || "—");
-      const rv = isQty ? liteQty(d.system_value) : (escHtml(d.system_value) || "—");
-      // Status diffs re-validated against Command Cloud are compared to the live
-      // Command Cloud status; everything else is compared to the Truckast DB.
-      const rightLabel = d.compare_source ? escHtml(d.compare_source) : "Truckast";
-      return (
-        '<span style="color:#b3141d;">Connex: ' + cx + '</span><br/>' +
-        '<span style="color:#198558;">' + rightLabel + ': ' + rv + '</span>'
-      );
-    };
-
-    rows += `
-      <tr>
-        <td><span style="background:#fff3cd;color:#856404;padding:3px 10px;border-radius:10px;font-size:11px;font-weight:600;">Mismatched</span></td>
-        <td>${escHtml(ext.order_code)}</td>
-        <td>${formatDateToMMDDYYYY(ext.order_date)}</td>
-        <td style="${diffs.ordered_qty ? "background:#fff5f5;" : ""}">${cell("ordered_qty", true)}</td>
-        <td style="${diffs.status ? "background:#fff5f5;" : ""}">${cell("status", false)}</td>
-      </tr>`;
-  }
-  for (const o of miss) {
-    const ext = o.external_order || o.externalOrder || {};
-    rows += `
-      <tr>
-        <td><span style="background:#f8d7da;color:#721c24;padding:3px 10px;border-radius:10px;font-size:11px;font-weight:600;">Missing</span></td>
-        <td>${escHtml(ext.order_code)}</td>
-        <td>${formatDateToMMDDYYYY(ext.order_date)}</td>
-        <td><span style="color:#b3141d;">Connex: ${liteQty(ext.ordered_qty)}</span><br/><span style="color:#999;">Truckast: Not found</span></td>
-        <td><span style="color:#b3141d;">Connex: ${escHtml(ext.status) || "—"}</span><br/><span style="color:#999;">Truckast: Not found</span></td>
-      </tr>`;
-  }
-
-  const tableOrNote = `
-        <div style="font-size:16px;font-weight:600;color:#2c3e50;margin:24px 0 10px;">Orders needing attention (${problemCount})</div>
-        <table width="100%" style="border-collapse:collapse;font-size:13px;border:1px solid #e0e0e0;border-radius:8px;overflow:hidden;">
-          <thead>
-            <tr style="background:#f8f9fa;color:#495057;text-align:left;">
-              <th style="padding:10px;">Status</th>
-              <th style="padding:10px;">Order Code</th>
-              <th style="padding:10px;">Date</th>
-              <th style="padding:10px;">Ordered Qty</th>
-              <th style="padding:10px;">Order Status</th>
-            </tr>
-          </thead>
-          <tbody>${rows}</tbody>
-        </table>
-        <div style="font-size:11px;color:#888;margin-top:8px;">Connex = scraped board value · Truckast = system (DB) value · Command Cloud = live source status (status re-validated against the Command Cloud API).</div>`;
-
-  return `
-  <!DOCTYPE html>
-  <html><head><meta charset="UTF-8"/></head>
-  <body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;background:#f5f5f5;padding:20px;color:#333;">
-    <div style="max-width:900px;margin:0 auto;background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 2px 4px rgba(0,0,0,.1);">
-      <div style="background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;padding:20px;text-align:center;">
-        <h1 style="margin:0;font-size:22px;">Orders Comparison (Connex)</h1>
-      </div>
-      <div style="padding:24px;">
-        ${tenantLine}
-        ${providerLine}
-        ${dateLine}
-        ${summaryCards}
-        ${tableOrNote}
-        ${perTabLine ? `<div style="font-size:12px;color:#7f8c8d;margin-top:12px;">${perTabLine}</div>` : ""}
-        <div style="margin-top:28px;padding-top:16px;border-top:1px solid #e0e0e0;font-size:12px;color:#7f8c8d;text-align:center;">
-          Automated report — Connex orders compared on ordered quantity + status.
-        </div>
-      </div>
-    </div>
-  </body></html>`;
-}
-
-/**
- * Send the slim lite-comparison email. Self-contained nodemailer send so the
- * main sendComparisonEmail is never touched.
- */
-async function sendLiteComparisonEmail(summary, fullResult, opts = {}) {
+async function sendPerfectMatchEmail(comparisonSummary) {
   const smtpHost = process.env.SMTP_HOST;
   const smtpPort = process.env.SMTP_PORT;
   const parsedPort = smtpPort ? parseInt(smtpPort, 10) : 587;
   const smtpUser = process.env.SMTP_USER;
   const smtpPassword = process.env.SMTP_PASSWORD;
   const smtpFrom = process.env.SMTP_FROM_EMAIL;
-  const smtpSecure =
-    process.env.SMTP_SECURE === "true" || process.env.SMTP_SECURE === "1";
+  const smtpSecure = process.env.SMTP_SECURE === 'true' || process.env.SMTP_SECURE === '1' ||
+                     process.env.MAIL_SECURE === 'true' || process.env.EMAIL_SECURE === 'true';
   const smtpTo = process.env.SMTP_TO;
   const smtpCc = process.env.SMTP_CC || process.env.MAIL_CC || process.env.EMAIL_CC;
 
   if (!smtpHost || !smtpUser || !smtpPassword) {
-    throw new Error("SMTP not configured: SMTP_HOST, SMTP_USER, and SMTP_PASSWORD are required");
+    throw new Error('SMTP not configured: SMTP_HOST, SMTP_USER, and SMTP_PASSWORD are required');
   }
 
-  const parseEmails = (s) =>
-    !s
-      ? []
-      : s.split(",").map((e) => e.trim()).filter((e) => e.includes("@") && e.length > 0);
+  const parseEmails = (emailString) => {
+    if (!emailString) return [];
+    return emailString.split(',').map(e => e.trim()).filter(e => e.includes('@') && e.length > 0);
+  };
 
   let recipients = parseEmails(smtpTo);
-  if (recipients.length === 0 && smtpFrom && smtpFrom.includes("@") && smtpFrom !== "noreply@example.com") {
+  if (recipients.length === 0 && smtpFrom && smtpFrom.includes('@') && smtpFrom !== 'noreply@example.com') {
     recipients = [smtpFrom.trim()];
   }
-  if (recipients.length === 0 && smtpUser && smtpUser.includes("@")) {
+  if (recipients.length === 0 && smtpUser && smtpUser.includes('@')) {
     recipients = [smtpUser.trim()];
   }
   if (recipients.length === 0) {
-    throw new Error("No email recipients: set SMTP_TO, SMTP_FROM_EMAIL, or SMTP_USER to a valid address");
+    throw new Error('No email recipients: set SMTP_TO, SMTP_FROM_EMAIL, or SMTP_USER to a valid address');
   }
-  const ccRecipients = parseEmails(smtpCc);
+  const ccRecipients = smtpCc ? parseEmails(smtpCc) : [];
 
-  const tenant = process.env.PRODUCER_NAME || process.env.TENANT_NAME || "Truckast";
-  const businessTimezone = process.env.BUSINESS_TIMEZONE || "America/Chicago";
-  const now = new Date();
-  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-  const tzDate = new Date(now.toLocaleString("en-US", { timeZone: businessTimezone }));
-  const formattedDate = `${months[tzDate.getMonth()]} ${String(tzDate.getDate()).padStart(2, "0")}, ${tzDate.getFullYear()}`;
-  const timeStr = now.toLocaleString("en-US", {
-    timeZone: businessTimezone,
-    hour: "numeric",
-    minute: "2-digit",
-    hour12: true
-  });
-  const tzAbbr = now
-    .toLocaleString("en-US", { timeZone: businessTimezone, timeZoneName: "short" })
-    .split(" ")
-    .pop();
+  const tenantName = process.env.TENANT_NAME || 'Truckast';
+  const producerName = process.env.PRODUCER_NAME || tenantName;
+  const scrapedSystem = process.env.SCRAPED_SYSTEM || 'ConcreteGo';
+  const businessTimezone = process.env.BUSINESS_TIMEZONE || 'America/Chicago';
 
-  const subject = `${tenant} - Connex - Orders Comparison - ${formattedDate} ${timeStr} ${tzAbbr}`;
-  const html = formatLiteEmailBody(summary, fullResult, {
-    dateStr: `${formattedDate} · ${timeStr} ${tzAbbr}`,
-    perTab: opts.perTab
-  });
+  const currentDate = new Date();
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const tzDate = new Date(currentDate.toLocaleString('en-US', { timeZone: businessTimezone }));
+  const formattedDate = `${months[tzDate.getMonth()]} ${String(tzDate.getDate()).padStart(2, '0')}, ${tzDate.getFullYear()}`;
+  const timeStr = currentDate.toLocaleString('en-US', { timeZone: businessTimezone, hour: 'numeric', minute: '2-digit', hour12: true });
+  const tzAbbr = currentDate.toLocaleString('en-US', { timeZone: businessTimezone, timeZoneName: 'short' }).split(' ').pop();
 
-  const transporter = nodemailer.createTransport({
-    host: smtpHost,
-    port: parsedPort,
-    secure: smtpSecure,
-    auth: { user: smtpUser, pass: smtpPassword },
-    tls: { rejectUnauthorized: false },
-    connectionTimeout: 30000,
-    greetingTimeout: 30000,
-    socketTimeout: 60000
-  });
+  const s = comparisonSummary || {};
+  const total = s.dashboard_total != null ? s.dashboard_total : (s.total_external_orders || 0);
+  // This email only fires when 0 mismatches/missing REMAIN after re-validation, so
+  // always show 0 (never the pre-resolution flagged count).
+  const mismatched = 0;
+  const missing = 0;
 
-  await transporter.verify();
+  const emailSubject = `${producerName} - ${scrapedSystem} - Perfect Order Match (100% Accuracy) - ${formattedDate} ${timeStr} ${tzAbbr}`;
 
-  const mailOptions = {
-    from: smtpFrom || smtpUser,
-    to: recipients.join(", "),
-    subject,
-    html
+  // Modern-card layout (table-based + inline styles for email-client safety).
+  // Shows ONLY Total Orders / Mismatched / Missing in System.
+  const emailBody = `
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#eef1f5;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;">
+    <tr><td align="center" style="padding:24px;">
+      <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="width:600px;max-width:600px;background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 6px 24px rgba(17,24,39,.08);border:1px solid #e8ebf0;">
+
+        <tr><td style="height:4px;background:#10b981;"></td></tr>
+        <tr><td style="padding:20px 28px;border-bottom:1px solid #eef1f5;">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
+            <td style="font-size:17px;font-weight:800;color:#0f172a;letter-spacing:-.2px;">
+              ${producerName}<span style="color:#94a3b8;font-weight:600;">&nbsp;•&nbsp;${scrapedSystem}</span>
+            </td>
+            <td align="right">
+              <span style="display:inline-block;background:#ecfdf5;color:#047857;font-size:11px;font-weight:700;padding:5px 11px;border-radius:999px;border:1px solid #a7f3d0;letter-spacing:.03em;">PERFECT MATCH</span>
+            </td>
+          </tr></table>
+        </td></tr>
+
+        <tr><td style="padding:28px 28px 8px;">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#ecfdf5;border:1px solid #a7f3d0;border-radius:14px;">
+            <tr><td align="center" style="padding:28px 24px;">
+              <table role="presentation" cellpadding="0" cellspacing="0" align="center"><tr>
+                <td style="width:56px;height:56px;background:#10b981;border-radius:50%;text-align:center;vertical-align:middle;font-size:30px;color:#ffffff;line-height:56px;font-weight:700;">&#10003;</td>
+              </tr></table>
+              <div style="font-size:23px;font-weight:800;color:#047857;margin-top:16px;letter-spacing:-.3px;">100% Accuracy — Perfect Order Match</div>
+              <div style="font-size:14px;color:#065f46;margin-top:8px;line-height:1.5;">Every scraped order matched the system. No mismatches and no missing orders were found.</div>
+            </td></tr>
+          </table>
+        </td></tr>
+
+        <tr><td style="padding:16px 28px 8px;">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
+            <td width="33%" style="padding:6px;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f8fafc;border:1px solid #e8ebf0;border-radius:12px;">
+                <tr><td align="center" style="padding:18px 8px;">
+                  <div style="font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.06em;font-weight:700;">Total Orders</div>
+                  <div style="font-size:30px;font-weight:800;color:#0f172a;margin-top:6px;">${total}</div>
+                </td></tr>
+              </table>
+            </td>
+            <td width="33%" style="padding:6px;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:12px;">
+                <tr><td align="center" style="padding:18px 8px;">
+                  <div style="font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.06em;font-weight:700;">Mismatched</div>
+                  <div style="font-size:30px;font-weight:800;color:#047857;margin-top:6px;">${mismatched}</div>
+                </td></tr>
+              </table>
+            </td>
+            <td width="33%" style="padding:6px;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:12px;">
+                <tr><td align="center" style="padding:18px 8px;">
+                  <div style="font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.06em;font-weight:700;">Missing in System</div>
+                  <div style="font-size:30px;font-weight:800;color:#047857;margin-top:6px;">${missing}</div>
+                </td></tr>
+              </table>
+            </td>
+          </tr></table>
+        </td></tr>
+
+        <tr><td style="padding:8px 34px 0;">
+          <div style="font-size:12px;color:#94a3b8;">Report generated <b style="color:#475569;">${formattedDate} · ${timeStr} ${tzAbbr}</b></div>
+        </td></tr>
+
+        <tr><td style="padding:18px 34px 26px;">
+          <div style="border-top:1px solid #eef1f5;padding-top:14px;font-size:11px;color:#94a3b8;line-height:1.5;">
+            This is an automated report generated by the Truckast Unified API for orders submitted via the browser extension.
+          </div>
+        </td></tr>
+
+      </table>
+    </td></tr>
+  </table>`;
+
+  try {
+    const transporter = nodemailer.createTransport({
+      host: smtpHost, port: parsedPort, secure: smtpSecure,
+      auth: { user: smtpUser, pass: smtpPassword },
+      tls: { rejectUnauthorized: false },
+      connectionTimeout: 30000, greetingTimeout: 30000, socketTimeout: 60000
+    });
+    await transporter.verify();
+    const mailOptions = { from: smtpFrom || smtpUser, to: recipients.join(', '), subject: emailSubject, html: emailBody };
+    if (ccRecipients.length > 0) mailOptions.cc = ccRecipients.join(', ');
+    await transporter.sendMail(mailOptions);
+    return true;
+  } catch (error) {
+    console.error('Error sending perfect-match email:', error);
+    throw error;
+  }
+}
+
+/**
+ * Send a per-DAY breakdown email for a multi-day browser-extension batch.
+ *
+ * Shows ONE email: a banner (green if every day is clean, amber if any day has
+ * issues), an overall Total/Mismatched/Missing summary, a per-day table
+ * (Date | Total | Mismatched | Missing), and — only for days that have issues —
+ * the list of that day's mismatched + missing orders.
+ *
+ * @param {object} summary - comparison summary
+ * @param {object} perDayTotals - { 'YYYY-MM-DD': scrapedOrderCount }
+ * @param {object} fullResult - emailComparisonResult.fullResult
+ * @param {object} revalidationResults - mismatched re-validation results (orders[])
+ * @returns {Promise<boolean>}
+ */
+async function sendDailyBreakdownEmail(summary, perDayTotals, fullResult, revalidationResults) {
+  const smtpHost = process.env.SMTP_HOST;
+  const parsedPort = process.env.SMTP_PORT ? parseInt(process.env.SMTP_PORT, 10) : 587;
+  const smtpUser = process.env.SMTP_USER;
+  const smtpPassword = process.env.SMTP_PASSWORD;
+  const smtpFrom = process.env.SMTP_FROM_EMAIL;
+  const smtpSecure = process.env.SMTP_SECURE === 'true' || process.env.SMTP_SECURE === '1';
+  const smtpTo = process.env.SMTP_TO;
+  const smtpCc = process.env.SMTP_CC || process.env.MAIL_CC || process.env.EMAIL_CC;
+  if (!smtpHost || !smtpUser || !smtpPassword) {
+    throw new Error('SMTP not configured: SMTP_HOST, SMTP_USER, and SMTP_PASSWORD are required');
+  }
+  const parseEmails = (str) => !str ? [] : str.split(',').map(e => e.trim()).filter(e => e.includes('@'));
+  let recipients = parseEmails(smtpTo);
+  if (recipients.length === 0 && smtpFrom && smtpFrom.includes('@')) recipients = [smtpFrom.trim()];
+  if (recipients.length === 0 && smtpUser && smtpUser.includes('@')) recipients = [smtpUser.trim()];
+  if (recipients.length === 0) throw new Error('No email recipients configured');
+  const ccRecipients = smtpCc ? parseEmails(smtpCc) : [];
+
+  const producerName = process.env.PRODUCER_NAME || process.env.TENANT_NAME || 'Truckast';
+  const scrapedSystem = process.env.SCRAPED_SYSTEM || 'ConcreteGo';
+  const businessTimezone = process.env.BUSINESS_TIMEZONE || 'America/Chicago';
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const currentDate = new Date();
+  const tzDate = new Date(currentDate.toLocaleString('en-US', { timeZone: businessTimezone }));
+  const formattedDate = `${months[tzDate.getMonth()]} ${String(tzDate.getDate()).padStart(2, '0')}, ${tzDate.getFullYear()}`;
+  const timeStr = currentDate.toLocaleString('en-US', { timeZone: businessTimezone, hour: 'numeric', minute: '2-digit', hour12: true });
+  const tzAbbr = currentDate.toLocaleString('en-US', { timeZone: businessTimezone, timeZoneName: 'short' }).split(' ').pop();
+
+  const fmtDay = (ymd) => {
+    const m = String(ymd).match(/^(\d{4})-(\d{2})-(\d{2})/);
+    return m ? `${months[parseInt(m[2], 10) - 1]} ${m[3]}, ${m[1]}` : String(ymd);
   };
-  if (ccRecipients.length > 0) mailOptions.cc = ccRecipients.join(", ");
+  const dayKey = (v) => String(v || '').slice(0, 10);
 
-  await transporter.sendMail(mailOptions);
-  return true;
+  // --- group results by day (same visible/confirmed filter as the comparison email)
+  const fr = fullResult || {};
+  let confirmed = [];
+  if (revalidationResults && revalidationResults.orders && revalidationResults.orders.length) {
+    confirmed = revalidationResults.orders
+      .filter(o => o.order_status === 'confirmed' && !shouldHideRevalidatedOrderForFreshMatch(o))
+      .map(o => ({
+        order_code: o.order_code, order_date: o.order_date, customer_name: o.customer_name,
+        diffs: getDisplayDifferencesWhereConcreteGoDiffersFromApi(o).map(d => ({
+          field: d.field, cg: d.scraped_value, sys: d.initial_system_value, api: d.fresh_system_value, hasApi: true
+        }))
+      }));
+  } else {
+    confirmed = (fr.mismatched_orders || []).map(o => {
+      const ext = o.external_order || o.externalOrder || {};
+      return {
+        order_code: ext.order_code, order_date: ext.order_date, customer_name: ext.customer_name,
+        diffs: (o.differences || []).map(d => ({ field: d.field, cg: d.external_value, sys: d.system_value, api: null, hasApi: false }))
+      };
+    });
+  }
+  const mismByDate = {};
+  confirmed.forEach(o => { const k = dayKey(o.order_date); (mismByDate[k] = mismByDate[k] || []).push(o); });
+  const missByDate = {};
+  (fr.missing_in_system_orders || []).forEach(o => {
+    const ext = o.external_order || o.externalOrder || {};
+    const k = dayKey(ext.order_date);
+    (missByDate[k] = missByDate[k] || []).push({ order_code: ext.order_code, customer_name: ext.customer_name });
+  });
+
+  const dates = Object.keys(perDayTotals || {}).sort();
+  const grandTotal = dates.reduce((a, d) => a + (perDayTotals[d] || 0), 0);
+  const totalMism = confirmed.length;
+  const totalMiss = (fr.missing_in_system_orders || []).length;
+  const allClean = totalMism === 0 && totalMiss === 0;
+  const issueDays = dates.filter(d => (mismByDate[d] || []).length || (missByDate[d] || []).length);
+  const rangeLabel = dates.length ? `${fmtDay(dates[0])} – ${fmtDay(dates[dates.length - 1])}` : formattedDate;
+
+  const valOrEmpty = (field, v) => (v === null || v === undefined || v === '') ? '<i style="color:#9ca3af;">(empty)</i>' : formatDifferenceValue(field, v);
+
+  // --- per-day table rows
+  const tableRows = dates.map(d => {
+    const tot = perDayTotals[d] || 0;
+    const m = (mismByDate[d] || []).length;
+    const mi = (missByDate[d] || []).length;
+    const clean = m === 0 && mi === 0;
+    const rowBg = clean ? '#f0fdf4' : '#fff7ed';
+    return `<tr style="background:${rowBg};">
+      <td style="padding:10px 12px;border-bottom:1px solid #eef1f5;font-size:13px;font-weight:700;color:#0f172a;">${fmtDay(d)}</td>
+      <td style="padding:10px 12px;border-bottom:1px solid #eef1f5;text-align:center;font-size:13px;color:#0f172a;">${tot}</td>
+      <td style="padding:10px 12px;border-bottom:1px solid #eef1f5;text-align:center;font-size:13px;font-weight:700;color:${m ? '#c2410c' : '#047857'};">${m}</td>
+      <td style="padding:10px 12px;border-bottom:1px solid #eef1f5;text-align:center;font-size:13px;font-weight:700;color:${mi ? '#b91c1c' : '#047857'};">${mi}</td>
+    </tr>`;
+  }).join('');
+
+  // --- per-day detail (only days with issues)
+  const orderCard = (o) => {
+    const diffRows = (o.diffs || []).map(d => `
+      <tr><td style="padding:6px 0;border-top:1px solid #f1f5f9;">
+        <div style="font-size:12px;font-weight:700;color:#334155;">${formatFieldName(d.field)}</div>
+        <div style="font-size:12px;color:#b91c1c;">${scrapedSystem}: ${valOrEmpty(d.field, d.cg)}</div>
+        <div style="font-size:12px;color:#047857;">Truckast: ${valOrEmpty(d.field, d.sys)}</div>
+        ${d.hasApi ? `<div style="font-size:12px;color:#1d4ed8;">Live API: ${valOrEmpty(d.field, d.api)}</div>` : ''}
+      </td></tr>`).join('');
+    return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#fff;border:1px solid #e8ebf0;border-radius:10px;margin-bottom:10px;"><tr><td style="padding:12px 14px;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
+        <td style="font-size:13px;font-weight:800;color:#0f172a;">#${o.order_code} <span style="color:#94a3b8;font-weight:600;font-size:12px;">&nbsp;${o.customer_name || ''}</span></td>
+        <td align="right"><span style="display:inline-block;background:#fff7ed;color:#c2410c;border:1px solid #fed7aa;font-size:10px;font-weight:700;padding:2px 8px;border-radius:999px;">MISMATCHED</span></td>
+      </tr></table>
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0">${diffRows}</table>
+    </td></tr></table>`;
+  };
+  const missingCard = (o) => `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#fff;border:1px solid #fecaca;border-radius:10px;margin-bottom:10px;"><tr><td style="padding:12px 14px;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
+        <td style="font-size:13px;font-weight:800;color:#0f172a;">#${o.order_code} <span style="color:#94a3b8;font-weight:600;font-size:12px;">&nbsp;${o.customer_name || ''}</span></td>
+        <td align="right"><span style="display:inline-block;background:#fef2f2;color:#b91c1c;border:1px solid #fecaca;font-size:10px;font-weight:700;padding:2px 8px;border-radius:999px;">MISSING IN SYSTEM</span></td>
+      </tr></table>
+    </td></tr></table>`;
+
+  const detailSections = issueDays.map(d => `
+    <div style="margin-top:18px;">
+      <div style="font-size:14px;font-weight:800;color:#b45309;margin-bottom:8px;">${fmtDay(d)} — ${(mismByDate[d] || []).length} mismatched, ${(missByDate[d] || []).length} missing</div>
+      ${(mismByDate[d] || []).map(orderCard).join('')}
+      ${(missByDate[d] || []).map(missingCard).join('')}
+    </div>`).join('');
+
+  // --- banner
+  const banner = allClean
+    ? `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#ecfdf5;border:1px solid #a7f3d0;border-radius:14px;"><tr><td align="center" style="padding:24px;">
+         <table role="presentation" cellpadding="0" cellspacing="0" align="center"><tr><td style="width:52px;height:52px;background:#10b981;border-radius:50%;text-align:center;vertical-align:middle;font-size:28px;color:#fff;line-height:52px;font-weight:700;">&#10003;</td></tr></table>
+         <div style="font-size:21px;font-weight:800;color:#047857;margin-top:14px;">100% Accuracy — All ${dates.length} day(s) matched</div>
+         <div style="font-size:13px;color:#065f46;margin-top:6px;">No mismatches and no missing orders across the whole range.</div>
+       </td></tr></table>`
+    : `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#fffbeb;border:1px solid #fde68a;border-radius:14px;"><tr><td align="center" style="padding:24px;">
+         <table role="presentation" cellpadding="0" cellspacing="0" align="center"><tr><td style="width:52px;height:52px;background:#f59e0b;border-radius:50%;text-align:center;vertical-align:middle;font-size:30px;color:#fff;line-height:52px;font-weight:800;">!</td></tr></table>
+         <div style="font-size:21px;font-weight:800;color:#b45309;margin-top:14px;">Discrepancies Found — ${issueDays.length} day(s) need review</div>
+         <div style="font-size:13px;color:#92400e;margin-top:6px;">${totalMism} mismatched and ${totalMiss} missing across ${dates.length} day(s). See the breakdown below.</div>
+       </td></tr></table>`;
+
+  const statCell = (label, value, color, bg, border) =>
+    `<td width="33%" style="padding:6px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:${bg};border:1px solid ${border};border-radius:12px;"><tr><td align="center" style="padding:14px 8px;">
+       <div style="font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.06em;font-weight:700;">${label}</div>
+       <div style="font-size:26px;font-weight:800;color:${color};margin-top:4px;">${value}</div>
+     </td></tr></table></td>`;
+
+  const emailSubject = `${producerName} - ${scrapedSystem} - Daily Breakdown (${rangeLabel}) - ${formattedDate} ${timeStr} ${tzAbbr}`;
+
+  const emailBody = `
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#eef1f5;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;">
+    <tr><td align="center" style="padding:24px;">
+      <table role="presentation" width="640" cellpadding="0" cellspacing="0" style="width:640px;max-width:640px;background:#fff;border-radius:16px;overflow:hidden;box-shadow:0 6px 24px rgba(17,24,39,.08);border:1px solid #e8ebf0;">
+        <tr><td style="height:4px;background:${allClean ? '#10b981' : '#f59e0b'};"></td></tr>
+        <tr><td style="padding:20px 28px;border-bottom:1px solid #eef1f5;">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
+            <td style="font-size:17px;font-weight:800;color:#0f172a;">${producerName}<span style="color:#94a3b8;font-weight:600;">&nbsp;•&nbsp;${scrapedSystem}</span></td>
+            <td align="right" style="font-size:12px;color:#64748b;">${rangeLabel}</td>
+          </tr></table>
+        </td></tr>
+        <tr><td style="padding:24px 28px 6px;">${banner}</td></tr>
+        <tr><td style="padding:14px 28px 4px;">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
+            ${statCell('Total Orders', grandTotal, '#0f172a', '#f8fafc', '#e8ebf0')}
+            ${statCell('Mismatched', totalMism, totalMism ? '#c2410c' : '#047857', totalMism ? '#fff7ed' : '#f0fdf4', totalMism ? '#fed7aa' : '#bbf7d0')}
+            ${statCell('Missing in System', totalMiss, totalMiss ? '#b91c1c' : '#047857', totalMiss ? '#fef2f2' : '#f0fdf4', totalMiss ? '#fecaca' : '#bbf7d0')}
+          </tr></table>
+        </td></tr>
+        <tr><td style="padding:16px 28px 4px;">
+          <div style="font-size:13px;font-weight:800;color:#0f172a;margin-bottom:8px;">Breakdown by day</div>
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e8ebf0;border-radius:10px;overflow:hidden;">
+            <tr style="background:#f1f5f9;">
+              <td style="padding:9px 12px;font-size:11px;font-weight:700;color:#475569;text-transform:uppercase;letter-spacing:.04em;">Date</td>
+              <td style="padding:9px 12px;font-size:11px;font-weight:700;color:#475569;text-transform:uppercase;letter-spacing:.04em;text-align:center;">Total</td>
+              <td style="padding:9px 12px;font-size:11px;font-weight:700;color:#475569;text-transform:uppercase;letter-spacing:.04em;text-align:center;">Mismatched</td>
+              <td style="padding:9px 12px;font-size:11px;font-weight:700;color:#475569;text-transform:uppercase;letter-spacing:.04em;text-align:center;">Missing</td>
+            </tr>
+            ${tableRows}
+          </table>
+        </td></tr>
+        ${issueDays.length ? `<tr><td style="padding:6px 28px 4px;"><div style="font-size:13px;font-weight:800;color:#0f172a;margin-top:10px;">Orders needing review</div>${detailSections}</td></tr>` : ''}
+        <tr><td style="padding:14px 34px 26px;"><div style="border-top:1px solid #eef1f5;padding-top:14px;font-size:11px;color:#94a3b8;line-height:1.5;">This is an automated report generated by the Truckast Unified API for orders submitted via the browser extension.</div></td></tr>
+      </table>
+    </td></tr>
+  </table>`;
+
+  try {
+    const transporter = nodemailer.createTransport({
+      host: smtpHost, port: parsedPort, secure: smtpSecure,
+      auth: { user: smtpUser, pass: smtpPassword }, tls: { rejectUnauthorized: false },
+      connectionTimeout: 30000, greetingTimeout: 30000, socketTimeout: 60000
+    });
+    await transporter.verify();
+    const mailOptions = { from: smtpFrom || smtpUser, to: recipients.join(', '), subject: emailSubject, html: emailBody };
+    if (ccRecipients.length > 0) mailOptions.cc = ccRecipients.join(', ');
+    await transporter.sendMail(mailOptions);
+    return true;
+  } catch (error) {
+    console.error('Error sending daily-breakdown email:', error);
+    throw error;
+  }
 }
 
 module.exports = {
   sendComparisonEmail,
-  shouldHideRevalidatedOrderForFreshMatch,
-  sendLiteComparisonEmail,
-  formatLiteEmailBody
+  sendPerfectMatchEmail,
+  sendDailyBreakdownEmail,
+  shouldHideRevalidatedOrderForFreshMatch
 };
 
 

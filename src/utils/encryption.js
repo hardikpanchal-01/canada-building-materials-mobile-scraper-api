@@ -1,7 +1,7 @@
 /**
  * RSA Encryption Utility
  *
- * Provides RSA encryption functions for Command Cloud SOAP API authentication.
+ * Provides RSA encryption functions for ConcreteGo SOAP API authentication.
  * Uses node-forge to convert XML RSA keys to PEM and encrypt passwords.
  */
 
@@ -50,7 +50,7 @@ function convertXmlKeyToPem(xmlKey) {
 /**
  * Encrypt a password using RSA PKCS1 v1.5
  *
- * Encodes the password as UTF-16LE (as required by Command Cloud API),
+ * Encodes the password as UTF-16LE (as required by ConcreteGo API),
  * encrypts with RSA PKCS1 v1.5, and returns Base64-encoded result.
  *
  * @param {string} publicKeyPem - PEM-formatted RSA public key

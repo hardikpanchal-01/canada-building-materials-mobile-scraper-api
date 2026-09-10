@@ -459,7 +459,7 @@ async function me(req, res) {
  *       1. Validates email format
  *       2. Checks rate limiting (5 min window)
  *       3. Verifies user exists in database
- *       4. Generates reset token via Postgres
+ *       4. Generates reset token via Auth API
  *       5. Sends password reset email
  *
  *       **Security Notes:**
@@ -803,7 +803,7 @@ async function getAppPermissions(req, res) {
       return res.status(200).json({
         success: true,
         message: 'App permissions retrieved successfully',
-        data: { permissions, showRegion, volume_unit: process.env.VOLUME_UNIT || 'CY' }
+        data: { permissions, showRegion }
       });
     }
 
@@ -819,7 +819,7 @@ async function getAppPermissions(req, res) {
     return res.status(200).json({
       success: true,
       message: 'App permissions retrieved successfully',
-      data: { permissions, showRegion, volume_unit: process.env.VOLUME_UNIT || 'CY' }
+      data: { permissions, showRegion }
     });
   } catch (error) {
     console.error('Error fetching app permissions:', error);
@@ -1036,7 +1036,7 @@ async function sendPhoneOtp(req, res) {
  *     summary: Verify phone OTP and complete registration (Step 4)
  *     description: |
  *       Verifies the phone OTP and completes user registration.
- *       Creates the user in Postgres Auth and public.users table.
+ *       Creates the user in auth.users and public.users table.
  *       Returns JWT access and refresh tokens on success.
  *     tags: [Auth]
  *     requestBody:

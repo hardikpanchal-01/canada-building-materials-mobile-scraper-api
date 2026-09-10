@@ -1,13 +1,13 @@
 /**
  * Saved & shared dashboards (ported from the web app's /api/ai/dashboards
- * routes). Backed by the shared Postgres tables `ai_dashboards` and
+ * routes). Backed by the shared PostgreSQL tables `ai_dashboards` and
  * `ai_dashboard_shares`. All ownership is keyed by the JWT user id.
  */
 
-import { dbServer } from './_dataClient.mjs';
+import { db } from './_db.mjs';
 
 export async function listDashboards(userId) {
-  const ownedRes = await dbServer
+  const ownedRes = await db
     .from('ai_dashboards')
     .select('id, title, thread_id, is_public, share_token, updated_at, created_at')
     .eq('user_id', userId)
@@ -15,12 +15,27 @@ export async function listDashboards(userId) {
     .limit(200);
   if (ownedRes.error) throw new Error(ownedRes.error.message);
 
-  const sharesRes = await dbServer
+  // Two-step fetch (share rows, then their dashboards) shaped exactly like the
+  // previous `ai_dashboards!inner(...)` embedded select.
+  let shared = [];
+  const sharesRes = await db
     .from('ai_dashboard_shares')
-    .select('dashboard_id, ai_dashboards!inner(id, title, user_id, thread_id, updated_at, created_at)')
+    .select('dashboard_id')
     .eq('shared_with_user_id', userId);
   // Sharing is optional — degrade gracefully if the table is absent.
-  const shared = sharesRes.error ? [] : (sharesRes.data ?? []);
+  if (!sharesRes.error && (sharesRes.data ?? []).length > 0) {
+    const ids = sharesRes.data.map((s) => s.dashboard_id);
+    const dashRes = await db
+      .from('ai_dashboards')
+      .select('id, title, user_id, thread_id, updated_at, created_at')
+      .in('id', ids);
+    if (!dashRes.error) {
+      const byId = new Map((dashRes.data ?? []).map((d) => [d.id, d]));
+      shared = sharesRes.data
+        .filter((s) => byId.has(s.dashboard_id))
+        .map((s) => ({ dashboard_id: s.dashboard_id, ai_dashboards: byId.get(s.dashboard_id) }));
+    }
+  }
 
   return { owned: ownedRes.data ?? [], shared };
 }
@@ -29,7 +44,7 @@ export async function saveDashboard(userId, body) {
   if (!body || !body.title || !Array.isArray(body.widgets)) {
     throw new Error('title and widgets required');
   }
-  const { data, error } = await dbServer
+  const { data, error } = await db
     .from('ai_dashboards')
     .insert({
       user_id: userId,
@@ -45,7 +60,7 @@ export async function saveDashboard(userId, body) {
 }
 
 async function dashboardReadable(userId, dashboardId) {
-  const { data: dash } = await dbServer
+  const { data: dash } = await db
     .from('ai_dashboards')
     .select('id, user_id, is_public')
     .eq('id', dashboardId)
@@ -53,7 +68,7 @@ async function dashboardReadable(userId, dashboardId) {
   if (!dash) return false;
   if (dash.user_id === userId) return true;
   if (dash.is_public) return true;
-  const { data: share } = await dbServer
+  const { data: share } = await db
     .from('ai_dashboard_shares')
     .select('id')
     .eq('dashboard_id', dashboardId)
@@ -64,7 +79,7 @@ async function dashboardReadable(userId, dashboardId) {
 
 export async function getDashboard(userId, id) {
   if (!(await dashboardReadable(userId, id))) return null;
-  const { data, error } = await dbServer
+  const { data, error } = await db
     .from('ai_dashboards')
     .select('id, user_id, title, layout, widgets, thread_id, share_token, is_public, updated_at, created_at')
     .eq('id', id)
@@ -80,7 +95,7 @@ export async function updateDashboard(userId, id, body) {
   if (Array.isArray(body.widgets)) update.widgets = body.widgets;
   if (Object.keys(update).length === 0) throw new Error('no fields to update');
 
-  const { data, error } = await dbServer
+  const { data, error } = await db
     .from('ai_dashboards')
     .update({ ...update, updated_at: new Date().toISOString() })
     .eq('id', id)
@@ -92,7 +107,7 @@ export async function updateDashboard(userId, id, body) {
 }
 
 export async function deleteDashboard(userId, id) {
-  const { error } = await dbServer
+  const { error } = await db
     .from('ai_dashboards')
     .delete()
     .eq('id', id)
