@@ -1,6 +1,6 @@
 const { verifyAccessToken } = require('../utils/jwtUtils');
 const { executeDirectSQL } = require('../utils/postgresExecutor');
-const { getAuthDbAdmin } = require('../config/authDatabase');
+const { executeAuthSQL } = require('../config/authPostgres');
 
 // Admin role code - same as web app (/src/lib/admin-check.ts)
 const ADMIN_ROLE_CODE = 'tk-admin';
@@ -181,27 +181,24 @@ async function getAllowedCustomerIdsForUser(userId) {
  * Resolve a UUID user ID to the integer ID used in tenant_users.
  * If the userId is already numeric, returns it as-is.
  */
-async function resolveUserId(dbClient, userId) {
+async function resolveUserId(userId) {
   // If already a number, return directly
   if (typeof userId === 'number' || /^\d+$/.test(userId)) {
     return Number(userId);
   }
 
-  // UUID — look up integer id from auth_tenant.users
-  const { data, error } = await dbClient
-    .schema('auth_tenant')
-    .from('users')
-    .select('id')
-    .eq('uuid', userId)
-    .is('deleted_at', null)
-    .limit(1);
+  // UUID — look up integer id from users (auth pool has search_path=auth_tenant,public)
+  const result = await executeAuthSQL(
+    'SELECT id FROM users WHERE uuid = $1 AND deleted_at IS NULL LIMIT 1',
+    [userId]
+  );
 
-  if (error || !data || data.length === 0) {
-    console.log('[AccessControl] resolveUserId: could not find integer id for UUID:', userId, 'error:', error?.message);
+  if (!result.data || result.data.length === 0) {
+    console.log('[AccessControl] resolveUserId: could not find integer id for UUID:', userId);
     return null;
   }
 
-  return data[0].id;
+  return result.data[0].id;
 }
 
 /**
@@ -214,40 +211,32 @@ const DEFAULT_TIMEZONE = { iana: 'America/Chicago' };
 
 async function getTenantTimezoneForUser(userId) {
   try {
-    const dbClient = getAuthDbAdmin();
-
     // Resolve UUID to integer user ID if needed
-    const numericUserId = await resolveUserId(dbClient, userId);
+    const numericUserId = await resolveUserId(userId);
     if (!numericUserId) return DEFAULT_TIMEZONE;
 
     // Step 1: Get tenant_id from tenant_users
-    const { data: tuData, error: tuError } = await dbClient
-      .schema('auth_tenant')
-      .from('tenant_users')
-      .select('tenant_id')
-      .eq('user_id', numericUserId)
-      .eq('status', 'active')
-      .limit(1);
+    const tuResult = await executeAuthSQL(
+      'SELECT tenant_id FROM tenant_users WHERE user_id = $1 AND status = $2 LIMIT 1',
+      [numericUserId, 'active']
+    );
 
-    if (tuError || !tuData || tuData.length === 0) {
+    if (!tuResult.data || tuResult.data.length === 0) {
       return DEFAULT_TIMEZONE;
     }
 
     // Step 2: Get timezone from tenants
-    const { data: tData, error: tError } = await dbClient
-      .schema('auth_tenant')
-      .from('tenants')
-      .select('timezone')
-      .eq('id', tuData[0].tenant_id)
-      .is('deleted_at', null)
-      .limit(1);
+    const tResult = await executeAuthSQL(
+      'SELECT timezone FROM tenants WHERE id = $1 AND deleted_at IS NULL LIMIT 1',
+      [tuResult.data[0].tenant_id]
+    );
 
-    if (tError || !tData || tData.length === 0) {
+    if (!tResult.data || tResult.data.length === 0) {
       return DEFAULT_TIMEZONE;
     }
 
-    if (tData[0].timezone) {
-      const tz = tData[0].timezone;
+    if (tResult.data[0].timezone) {
+      const tz = tResult.data[0].timezone;
       // Support both { iana: "America/Chicago" } and plain string "America/Chicago"
       const iana = typeof tz === 'string' ? tz : (tz.iana || null);
       return iana ? { iana } : DEFAULT_TIMEZONE;
@@ -267,44 +256,36 @@ async function getTenantTimezoneForUser(userId) {
  */
 async function getTenantShowRegionForUser(userId) {
   try {
-    const dbClient = getAuthDbAdmin();
-
     // Resolve UUID to integer user ID if needed
-    const numericUserId = await resolveUserId(dbClient, userId);
+    const numericUserId = await resolveUserId(userId);
     if (!numericUserId) return false;
 
     // Step 1: Get tenant_id from tenant_users
-    const { data: tuData, error: tuError } = await dbClient
-      .schema('auth_tenant')
-      .from('tenant_users')
-      .select('tenant_id')
-      .eq('user_id', numericUserId)
-      .eq('status', 'active')
-      .limit(1);
+    const tuResult = await executeAuthSQL(
+      'SELECT tenant_id FROM tenant_users WHERE user_id = $1 AND status = $2 LIMIT 1',
+      [numericUserId, 'active']
+    );
 
-    if (tuError || !tuData || tuData.length === 0) {
-      console.log('[AccessControl] show_regions: no tenant_user found for userId:', userId, 'error:', tuError?.message);
+    if (!tuResult.data || tuResult.data.length === 0) {
+      console.log('[AccessControl] show_regions: no tenant_user found for userId:', userId);
       return false;
     }
 
-    console.log('[AccessControl] show_regions: found tenant_id:', tuData[0].tenant_id, 'for userId:', userId);
+    console.log('[AccessControl] show_regions: found tenant_id:', tuResult.data[0].tenant_id, 'for userId:', userId);
 
     // Step 2: Get show_regions from tenants
-    const { data: tData, error: tError } = await dbClient
-      .schema('auth_tenant')
-      .from('tenants')
-      .select('show_regions')
-      .eq('id', tuData[0].tenant_id)
-      .is('deleted_at', null)
-      .limit(1);
+    const tResult = await executeAuthSQL(
+      'SELECT show_regions FROM tenants WHERE id = $1 AND deleted_at IS NULL LIMIT 1',
+      [tuResult.data[0].tenant_id]
+    );
 
-    if (tError || !tData || tData.length === 0) {
-      console.log('[AccessControl] show_regions: no tenant found for tenant_id:', tuData[0].tenant_id, 'error:', tError?.message);
+    if (!tResult.data || tResult.data.length === 0) {
+      console.log('[AccessControl] show_regions: no tenant found for tenant_id:', tuResult.data[0].tenant_id);
       return false;
     }
 
-    console.log('[AccessControl] show_regions raw value:', tData[0].show_regions, 'type:', typeof tData[0].show_regions);
-    return tData[0].show_regions === true;
+    console.log('[AccessControl] show_regions raw value:', tResult.data[0].show_regions, 'type:', typeof tResult.data[0].show_regions);
+    return tResult.data[0].show_regions === true;
   } catch (error) {
     console.error('[AccessControl] Error checking show_regions:', error.message);
     return false;
@@ -363,6 +344,7 @@ async function getAllowedProjectCodesForUser(userId) {
 
 // Cache for central auth UUID → public.users UUID mapping (avoids repeated lookups)
 const _userIdMappingCache = new Map();
+const USER_ID_MAPPING_CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
 
 /**
  * Resolve the effective user ID for role/access queries.
@@ -372,7 +354,7 @@ const _userIdMappingCache = new Map();
 async function resolveEffectiveUserId(userId, userEmail) {
   // Check mapping cache first (no TTL — mapping never changes)
   const cached = _userIdMappingCache.get(userId);
-  if (cached) return cached;
+  if (cached && (Date.now() - cached.ts) < USER_ID_MAPPING_CACHE_TTL_MS) return cached.value;
 
   // Single query: check if userId exists in user_roles OR user_customers, and also look up by email
   try {
@@ -389,14 +371,14 @@ async function resolveEffectiveUserId(userId, userEmail) {
 
       // If userId exists in roles/customers, use it directly
       if (row.id_exists) {
-        _userIdMappingCache.set(userId, userId);
+        _userIdMappingCache.set(userId, { value: userId, ts: Date.now() });
         return userId;
       }
 
       // Otherwise use the email-mapped UUID
       if (row.email_user_id && row.email_user_id !== userId) {
         console.log(`[AccessControl] Resolved user ID: ${userId} → ${row.email_user_id} (via email ${userEmail})`);
-        _userIdMappingCache.set(userId, row.email_user_id);
+        _userIdMappingCache.set(userId, { value: row.email_user_id, ts: Date.now() });
         return row.email_user_id;
       }
     }
@@ -405,7 +387,7 @@ async function resolveEffectiveUserId(userId, userEmail) {
   }
 
   // No mapping found — use the original userId
-  _userIdMappingCache.set(userId, userId);
+  _userIdMappingCache.set(userId, { value: userId, ts: Date.now() });
   return userId;
 }
 
