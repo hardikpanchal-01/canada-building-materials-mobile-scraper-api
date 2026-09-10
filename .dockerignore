@@ -1,0 +1,58 @@
+# Version control
+.git
+.gitignore
+.gitattributes
+
+# Dependencies (re-installed inside the image)
+node_modules
+
+# Environment files (must be injected at runtime, not baked into image)
+.env
+.env.*
+
+# Firebase service account — required at runtime for FCM push notifications
+# TODO: migrate to FIREBASE_SERVICE_ACCOUNT env var and re-add exclusion
+# src/config/truckast-app-firebase-adminsdk-*.json
+
+# IDE / editor
+.idea
+.vscode
+.claude
+*.swp
+*.swo
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Build / cache output
+dist
+build
+out
+coverage
+.nyc_output
+
+# Logs
+logs
+*.log
+npm-debug.log*
+
+# Temp files
+tmp
+temp
+*.tmp
+*.temp
+
+# Docs / one-off scripts not needed in prod image
+README.md
+docs
+scripts/test-*
+scripts/verify-*
+scripts/sendTestNotification.js
+check-deduplication-setup.js
+
+# Docker files themselves
+Dockerfile
+.dockerignore
+docker-compose.yml
+deploy
