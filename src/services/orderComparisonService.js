@@ -397,7 +397,7 @@ async function fetchSystemOrdersBatch(orderCodes, minDate, maxDate, timeoutMs = 
       COALESCE(lt.is_last_load_completed, false) as is_last_load_completed
     FROM orders o
     LEFT JOIN order_products op ON op.order_id = o.order_id
-      AND (op.order_qty_unit = 'YDQ' AND op.is_mix = true)
+      AND (op.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op.is_mix = true)
     LEFT JOIN order_product_schedules ops ON ops.order_product_id = op.id
     LEFT JOIN schedule_fallback sfb ON sfb.order_id = o.order_id
     LEFT JOIN order_notes_agg ona ON ona.order_id = o.order_id
@@ -1543,7 +1543,7 @@ async function fetchDashboardCounts(minDate, maxDate) {
       AND EXISTS (
         SELECT 1 FROM order_products op_cy
         WHERE op_cy.order_id = o.order_id
-          AND op_cy.order_qty_unit = 'YDQ'
+          AND op_cy.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3')
       )
     GROUP BY o.order_id, o.order_code, o.customer_name,
              o.delivery_addr1, o.removed, o.remove_reason_code

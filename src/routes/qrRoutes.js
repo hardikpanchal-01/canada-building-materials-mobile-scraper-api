@@ -17,4 +17,11 @@ router.post('/verify', authenticate, qrController.verifyQr);
  */
 router.post('/encrypt', authenticate, qrController.encryptQr);
 
+/**
+ * @route   POST /api/qr/decrypt
+ * @desc    Decrypt a QR payload (fallback endpoint, same as verify but different response shape)
+ * @access  Private
+ */
+router.post('/decrypt', authenticate, qrController.decryptQr);
+
 module.exports = router;

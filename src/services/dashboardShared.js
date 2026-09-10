@@ -70,7 +70,7 @@ async function getTodayOverview(dateStr, exclusionPatterns = [], userAccess = nu
 
     if (userAccess.allowedPlants && userAccess.allowedPlants.length > 0) {
       const placeholders = userAccess.allowedPlants.map((_, i) => `$${paramIndex + i}::text`).join(', ');
-      accessOrConditions.push(`EXISTS (SELECT 1 FROM order_products op_ac INNER JOIN order_product_schedules ops_ac ON ops_ac.order_product_id = op_ac.id WHERE op_ac.order_id = o.order_id AND (op_ac.order_qty_unit = 'YDQ' AND op_ac.is_mix = true) AND ops_ac.plant_code::text IN (${placeholders}))`);
+      accessOrConditions.push(`EXISTS (SELECT 1 FROM order_products op_ac INNER JOIN order_product_schedules ops_ac ON ops_ac.order_product_id = op_ac.id WHERE op_ac.order_id = o.order_id AND (op_ac.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op_ac.is_mix = true) AND ops_ac.plant_code::text IN (${placeholders}))`);
       queryParams.push(...userAccess.allowedPlants.map(p => String(p)));
       paramIndex += userAccess.allowedPlants.length;
     }
@@ -107,7 +107,7 @@ async function getTodayOverview(dateStr, exclusionPatterns = [], userAccess = nu
         SUM(COALESCE(op.delv_qty, 0)) as delivered_qty
       FROM orders o
       INNER JOIN order_products op ON op.order_id = o.order_id
-        AND (op.order_qty_unit = 'YDQ' AND op.is_mix = true)
+        AND (op.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op.is_mix = true)
       WHERE ${whereConditions.join(' AND ')}
       GROUP BY o.order_id, o.removed, o.remove_reason_code, o.current_status
     ),
@@ -194,7 +194,7 @@ async function getAverageWeather(dateStr, exclusionPatterns = [], userAccess = n
 
     if (userAccess.allowedPlants && userAccess.allowedPlants.length > 0) {
       const placeholders = userAccess.allowedPlants.map((_, i) => `$${paramIndex + i}::text`).join(', ');
-      accessOrConditions.push(`EXISTS (SELECT 1 FROM order_products op_ac INNER JOIN order_product_schedules ops_ac ON ops_ac.order_product_id = op_ac.id WHERE op_ac.order_id = o.order_id AND (op_ac.order_qty_unit = 'YDQ' AND op_ac.is_mix = true) AND ops_ac.plant_code::text IN (${placeholders}))`);
+      accessOrConditions.push(`EXISTS (SELECT 1 FROM order_products op_ac INNER JOIN order_product_schedules ops_ac ON ops_ac.order_product_id = op_ac.id WHERE op_ac.order_id = o.order_id AND (op_ac.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op_ac.is_mix = true) AND ops_ac.plant_code::text IN (${placeholders}))`);
       queryParams.push(...userAccess.allowedPlants.map(p => String(p)));
       paramIndex += userAccess.allowedPlants.length;
     }
@@ -228,7 +228,7 @@ async function getAverageWeather(dateStr, exclusionPatterns = [], userAccess = n
       o.delivery_addr3
     FROM orders o
     INNER JOIN order_products op ON op.order_id = o.order_id
-      AND (op.order_qty_unit = 'YDQ' AND op.is_mix = true)
+      AND (op.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op.is_mix = true)
     WHERE ${whereConditions.join(' AND ')}
     GROUP BY o.order_id, o.weather_data, o.delivery_addr1, o.delivery_addr2, o.delivery_addr3
     LIMIT 50

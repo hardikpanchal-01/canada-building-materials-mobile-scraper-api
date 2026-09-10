@@ -17,6 +17,29 @@ async function resolveDbUserId(jwtUserId, email) {
 }
 
 /**
+ * @route   GET /api/user-preferences
+ * @desc    Get all user preferences
+ * @access  Private
+ */
+router.get('/', authenticate, async (req, res) => {
+  try {
+    const userId = await resolveDbUserId(req.user.id, req.user.email);
+    const result = await executeDirectSQL(
+      'SELECT preference_key, preference_value FROM user_preferences WHERE user_id = $1',
+      [userId]
+    );
+    const prefs = {};
+    for (const row of (result.data || [])) {
+      prefs[row.preference_key] = row.preference_value;
+    }
+    return res.status(200).json({ success: true, data: prefs });
+  } catch (err) {
+    console.error('[UserPreferences] GET all error:', err.message);
+    return res.status(500).json({ success: false, message: 'Failed to fetch preferences' });
+  }
+});
+
+/**
  * @route   GET /api/user-preferences/:key
  * @desc    Get a single user preference by key
  * @access  Private

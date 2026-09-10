@@ -168,6 +168,7 @@ app.use('/api/auth', require('./src/routes/authRoutes'));
 app.use('/api/users', require('./src/routes/userRoutes'));
 app.use('/api/notifications', require('./src/routes/notificationRoutes'));
 app.use('/api/orders', require('./src/routes/orderRoutes'));
+app.use('/api/dashboard', require('./src/routes/dashboardRoutes'));
 app.use('/api/new-dashboard', require('./src/routes/newDashboardRoutes'));
 app.use('/api', require('./src/routes/scrapedOrderRoutes'));
 app.use('/api/queue', require('./src/routes/queueRoutes'));

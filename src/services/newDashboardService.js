@@ -289,7 +289,7 @@ async function getActiveDeliveries(dateStr, exclusionPatterns = [], userAccess =
         STRING_AGG(DISTINCT op.item_code, ', ') as product_codes
       FROM orders o
       INNER JOIN order_products op ON op.order_id = o.order_id
-        AND (op.order_qty_unit = 'YDQ' AND op.is_mix = true)
+        AND (op.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op.is_mix = true)
       LEFT JOIN order_product_schedules ops ON ops.order_product_id = op.id
       WHERE ${whereConditions.join(' AND ')}
       GROUP BY o.order_id, o.order_code, o.order_date, o.customer_name,

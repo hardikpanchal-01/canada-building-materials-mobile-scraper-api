@@ -239,7 +239,7 @@ async function bulkUpdateOrderProducts(updates) {
           AND o.order_date >= $2::date
           AND o.order_date < ($2::date + INTERVAL '1 day')
           AND UPPER(TRIM(op.item_code)) LIKE UPPER(TRIM($${values.length + 3})) || '%'
-          AND op.order_qty_unit = 'YDQ'
+          AND op.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3')
           AND op.is_mix = true
         RETURNING op.id
       `;
@@ -254,7 +254,7 @@ async function bulkUpdateOrderProducts(updates) {
           AND UPPER(TRIM(o.order_code)) = UPPER(TRIM($1))
           AND o.order_date >= $2::date
           AND o.order_date < ($2::date + INTERVAL '1 day')
-          AND op.order_qty_unit = 'YDQ'
+          AND op.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3')
           AND op.is_mix = true
         RETURNING op.id
       `;
@@ -313,7 +313,7 @@ async function bulkUpdateOrderSchedules(updates) {
           AND o.order_date >= $2::date
           AND o.order_date < ($2::date + INTERVAL '1 day')
           AND UPPER(TRIM(op.item_code)) LIKE UPPER(TRIM($${values.length + 3})) || '%'
-          AND op.order_qty_unit = 'YDQ'
+          AND op.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3')
           AND op.is_mix = true
         RETURNING ops.id
       `;
@@ -328,7 +328,7 @@ async function bulkUpdateOrderSchedules(updates) {
           AND UPPER(TRIM(o.order_code)) = UPPER(TRIM($1))
           AND o.order_date >= $2::date
           AND o.order_date < ($2::date + INTERVAL '1 day')
-          AND op.order_qty_unit = 'YDQ'
+          AND op.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3')
           AND op.is_mix = true
         RETURNING ops.id
       `;

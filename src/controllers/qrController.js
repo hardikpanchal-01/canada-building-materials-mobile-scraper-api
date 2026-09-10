@@ -106,6 +106,17 @@ async function verifyQr(req, res) {
       });
     }
 
+    // Add d3Meta for D3 format scans so mobile app can build pdfUrl/trackingUrl
+    if (result.qrData?.format === 'd3' && result.qrData?.url) {
+      const url = result.qrData.url;
+      const sigMatch = url.match(/[?&]sig=([^&]+)/);
+      result.d3Meta = {
+        format: 'd3',
+        url,
+        sig: sigMatch ? sigMatch[1] : undefined,
+      };
+    }
+
     return res.status(200).json({
       success: true,
       message: 'QR verified successfully',
@@ -197,4 +208,68 @@ async function encryptQr(req, res) {
   }
 }
 
-module.exports = { verifyQr, encryptQr };
+/**
+ * POST /api/qr/decrypt
+ * Fallback decrypt endpoint — reuses verifyQr logic but returns the response
+ * shape the mobile app's tryDecryptEndpoint expects ({ ok, kind, ticket, ... }).
+ */
+async function decryptQr(req, res) {
+  try {
+    const { payload } = req.body;
+
+    if (!payload || typeof payload !== 'string' || payload.trim().length === 0) {
+      return res.status(400).json({ ok: false, error: 'QR payload is required' });
+    }
+
+    const result = await qrService.verifyQrPayload(payload.trim(), req.user);
+
+    if (!result.success) {
+      const status = result.error_code === 'D3_EXTERNAL' ? 400
+        : result.error_code === 'NOT_FOUND' ? 404
+        : 400;
+      return res.status(status).json({
+        ok: false,
+        error: result.message,
+        url: result.url || undefined,
+      });
+    }
+
+    // Build response matching the shape mobile app expects from /api/qr/decrypt
+    if (result.kind === 'ticket') {
+      const ticket = result.details?.ticket || {};
+      const order = result.details?.order || {};
+      return res.json({
+        ok: true,
+        kind: 'ticket',
+        format: result.qrData?.format || 'legacy',
+        ticket,
+        orderCode: order.order_code || ticket.order_code || result.qrData?.orderCode || '',
+        meta: {
+          orderId: order.order_id || ticket.order_id || result.qrData?.orderId,
+          truckCode: ticket.truck?.truck_code || result.qrData?.truckCode,
+          url: result.qrData?.url,
+          trackingUrl: result.qrData?.url,
+          pdfUrl: result.d3Meta?.sig
+            ? (() => { try { const m = result.qrData.url.match(/^(https?:\/\/[^/]+)/); return m ? `${m[1]}/api/t/${ticket.ticket_code}/pdf?sig=${result.d3Meta.sig}` : null; } catch { return null; } })()
+            : null,
+        },
+      });
+    }
+
+    if (result.kind === 'truck') {
+      const truck = result.details?.truck || {};
+      return res.json({
+        ok: true,
+        kind: 'truck',
+        truck: { code: truck.code || result.qrData?.truckCode },
+      });
+    }
+
+    return res.status(400).json({ ok: false, error: 'Unknown QR kind' });
+  } catch (error) {
+    console.error('QR decrypt error:', error);
+    return res.status(500).json({ ok: false, error: 'Failed to decrypt QR code' });
+  }
+}
+
+module.exports = { verifyQr, encryptQr, decryptQr };

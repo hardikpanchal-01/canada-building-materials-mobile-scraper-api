@@ -92,6 +92,65 @@ const ALGORITHM = 'aes-256-gcm';
 const IV_LENGTH = 12;
 const AUTH_TAG_LENGTH = 16;
 
+// --- D3 format support (TripleDES-CBC, SQL Server ENCRYPTBYPASSPHRASE) ---
+const D3_VERSION = Buffer.from([0x01, 0x00, 0x00, 0x00]);
+const D3_MAGIC = Buffer.from([0x0d, 0xf0, 0xad, 0xba]);
+const D3_HEX_RE = /^\[TK\/E\](01000000[0-9A-Fa-f]+)$/;
+
+function getD3Passphrase() {
+  return process.env.D3_QR_PASSPHRASE || null;
+}
+
+function tripleDesKey(passphrase) {
+  const k16 = crypto.createHash('sha1').update(Buffer.from(passphrase, 'utf16le')).digest().subarray(0, 16);
+  return Buffer.concat([k16, k16.subarray(0, 8)]); // K1 K2 K1
+}
+
+/**
+ * Decrypt a D3-format QR string → plaintext URL.
+ * Returns the URL string or null on any failure.
+ */
+function decryptD3QrText(text) {
+  const passphrase = getD3Passphrase();
+  if (!passphrase) return null;
+
+  const m = D3_HEX_RE.exec(text);
+  if (!m || m[1].length % 2 !== 0) return null;
+
+  const blob = Buffer.from(m[1], 'hex');
+  if (blob.length < 20 || !blob.subarray(0, 4).equals(D3_VERSION)) return null;
+
+  const iv = blob.subarray(4, 12);
+  const ct = blob.subarray(12);
+  if (ct.length % 8 !== 0) return null;
+
+  let plain;
+  try {
+    const d = crypto.createDecipheriv('des-ede3-cbc', tripleDesKey(passphrase), iv);
+    plain = Buffer.concat([d.update(ct), d.final()]);
+  } catch { return null; }
+
+  if (plain.length < 8 || !plain.subarray(0, 4).equals(D3_MAGIC)) return null;
+  const authLen = plain.readUInt16LE(4);
+  const len = plain.readUInt16LE(6);
+  if (authLen !== 0 || 8 + len > plain.length) return null;
+
+  const payload = plain.subarray(8, 8 + len);
+  if (payload.length === 0) return '';
+  if (payload.length % 2 !== 0) return payload.toString('latin1');
+  // UTF-16LE has a null byte as the high byte for ASCII chars (e.g. 'h' = 68 00).
+  // Plain ASCII/Latin-1 has no null bytes. Check byte 1 to distinguish.
+  const isUtf16 = payload.length >= 2 && payload[1] === 0x00 && payload[0] !== 0x00;
+  return isUtf16 ? payload.toString('utf16le') : payload.toString('latin1');
+}
+
+/**
+ * Check if a QR string is D3 format.
+ */
+function isD3Format(payload) {
+  return D3_HEX_RE.test(payload);
+}
+
 const DEFAULT_QR_KEY_HEX = 'd43e6d3bece53add33e7faaa051c0c9234ae504bb3f33b59556d8103b7c5fc7b';
 const DEFAULT_TICKET_SECRET = 'dev-only-ticket-qr-secret-change-me';
 const DEFAULT_TRUCK_SECRET = 'dev-only-truck-qr-secret-change-me';
@@ -248,11 +307,92 @@ async function getTenantQrSettings(userAccess) {
  * @param {object} userAccess - User access info from auth middleware (for row-level filtering)
  * @returns {object} { success, kind, qrData, details, security_mode }
  */
+/**
+ * Enrich D3 qrData with full TKTicketData fields from resolved ticket/order data.
+ * This ensures the mobile app's ScanDetails screen has all fields it needs.
+ */
+function enrichD3QrData(qrData, ticket, order, tenantSettings) {
+  if (qrData.format !== 'd3') return qrData;
+  return {
+    ...qrData,
+    orderCode: order?.order_code || ticket?.order_code || '',
+    orderId: String(order?.order_id || ticket?.order_id || ''),
+    ticketId: String(ticket?.ticket_id || ''),
+    truckCode: ticket?.truck?.truck_code || ticket?.truck_code || '',
+    truckId: '',
+    tenantId: '',
+    tenantUuid: '',
+    tenantSubdomain: tenantSettings?.tenantSubdomain || '',
+    tenantStatus: 'active',
+    tenantName: tenantSettings?.tenantName || '',
+    iat: Date.now(),
+  };
+}
+
 async function verifyQrPayload(payload, userAccess) {
   // Step 1: Decrypt or parse the QR data
   let qrData;
 
-  if (payload.startsWith(TK_PREFIX)) {
+  if (payload.startsWith(TK_PREFIX) && isD3Format(payload)) {
+    // D3 format: TripleDES-CBC encrypted URL
+    const url = decryptD3QrText(payload);
+    if (!url) {
+      return {
+        success: false,
+        error_code: 'DECRYPT_FAILED',
+        message: 'D3 QR decryption failed (wrong passphrase or corrupted code)',
+      };
+    }
+
+    // D3 external URL (points at D3's platform) — return the PDF URL for direct download
+    if (url.includes('tkqrpdfapi.truckast.com')) {
+      const truckMatch = url.match(/TruckNumber=([^&]+)/);
+      const titleMatch = url.match(/title=([^&]+)/);
+      const ticketMatch = url.match(/Tkt[:\s]*(\d+)/i);
+      const title = titleMatch ? decodeURIComponent(titleMatch[1]) : '';
+      const ticketCode = ticketMatch ? ticketMatch[1] : '';
+      const truckCode = truckMatch ? truckMatch[1] : '';
+
+      return {
+        success: true,
+        kind: 'ticket',
+        qrData: {
+          kind: 'ticket',
+          ticketCode,
+          truckCode,
+          format: 'd3_external',
+          url,
+        },
+        d3Meta: { format: 'd3_external', url, pdfUrl: url.replace(/ /g, '%20'), title },
+        security_mode: null,
+        details: {
+          ticket: {
+            ticket_code: ticketCode,
+            truck: { truck_code: truckCode, truck_description: null, latitude: null, longitude: null },
+            status_display: title || `Ticket ${ticketCode}`,
+          },
+        },
+      };
+    } else {
+      // Our platform URL — extract ticket code
+      const ticketMatch = url.match(/\/t\/(\d+)/);
+      const ticketAlt = !ticketMatch && url.match(/ticket[_-]?(?:code|id)?=(\d+)/i);
+      const ticketCode = ticketMatch ? ticketMatch[1] : (ticketAlt ? ticketAlt[1] : null);
+
+      if (!ticketCode) {
+        return {
+          success: false,
+          error_code: 'INVALID_FORMAT',
+          message: 'D3 QR decrypted but URL does not contain a ticket code',
+          url,
+        };
+      }
+
+      const sigMatch = url.match(/[?&]sig=([^&]+)/);
+      qrData = { kind: 'ticket', ticketCode, format: 'd3', url, sig: sigMatch ? sigMatch[1] : '' };
+    }
+  } else if (payload.startsWith(TK_PREFIX)) {
+    // Legacy AES-256-GCM format
     try {
       qrData = decryptQrPayload(payload);
     } catch (err) {
@@ -283,6 +423,12 @@ async function verifyQrPayload(payload, userAccess) {
   // Fetch tenant security_mode once and attach to every success branch
   const tenantSettings = await getTenantQrSettings(userAccess);
   const security_mode = tenantSettings?.security_mode ?? null;
+
+  // For D3 format, fetch tenant info to enrich qrData with tenantName/subdomain
+  let tenantInfo = null;
+  if (qrData.format === 'd3') {
+    tenantInfo = await getTenantInfo(userAccess);
+  }
 
   try {
     if (qrData.kind === 'ticket') {
@@ -581,6 +727,19 @@ async function verifyQrPayload(payload, userAccess) {
     };
   }
 }
+
+// Wrapper that enriches D3 qrData on successful results
+const _rawVerifyQrPayload = verifyQrPayload;
+verifyQrPayload = async function(payload, userAccess) {
+  const result = await _rawVerifyQrPayload(payload, userAccess);
+  if (result.success && result.qrData?.format === 'd3' && result.kind === 'ticket') {
+    const ticket = result.details?.ticket;
+    const order = result.details?.order;
+    const tInfo = await getTenantInfo(userAccess);
+    result.qrData = enrichD3QrData(result.qrData, ticket, order, tInfo);
+  }
+  return result;
+};
 
 /**
  * Fetch full tenant info for QR encryption (id, uuid, name, subdomain, status, qr_user_active).

@@ -60,7 +60,7 @@ async function getODPData(req, res) {
               tp.id as tp_id, tp.ticket_id as tp_ticket_id, tp.is_mix, tp.load_qty
        FROM tickets t
        LEFT JOIN ticket_products tp ON tp.ticket_id = t.ticket_id AND tp.is_mix = true
-       WHERE t.order_id = ANY($1::text[])
+       WHERE t.order_id = ANY($1::bigint[])
        ORDER BY t.ticket_id`, [`{${ids.join(',')}}`]
     );
 
@@ -71,7 +71,7 @@ async function getODPData(req, res) {
               ops.delivery_rate_per_hour, ops.truck_space, ops.number_of_loads, ops.load_qty
        FROM order_products op
        LEFT JOIN order_product_schedules ops ON ops.order_product_id = op.id
-       WHERE op.order_id = ANY($1::text[])
+       WHERE op.order_id = ANY($1::bigint[])
        ORDER BY op.id`, [`{${ids.join(',')}}`]
     );
 

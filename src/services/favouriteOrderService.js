@@ -118,7 +118,7 @@ async function getFavourites(userId, userAccess) {
           SUM(order_qty) AS ordered_qty,
           SUM(delv_qty) AS delivered_qty
         FROM order_products
-        WHERE (order_qty_unit = 'YDQ' AND is_mix = true)
+        WHERE (order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND is_mix = true)
         GROUP BY order_id
       ) prod ON prod.order_id = o.order_id
       WHERE f.user_id = $1

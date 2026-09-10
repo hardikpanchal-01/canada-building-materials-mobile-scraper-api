@@ -455,7 +455,7 @@ async function getTickets(params = {}) {
     WITH order_totals_agg AS (
       SELECT op.order_id, SUM(COALESCE(op.order_qty, 0)) as ordered_qty
       FROM order_products op
-      WHERE op.order_qty_unit = 'YDQ' AND op.is_mix = true
+      WHERE op.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op.is_mix = true
       GROUP BY op.order_id
     ),
     ticket_data AS (
@@ -758,7 +758,7 @@ async function getTicketsByOrderId(orderId, options = {}) {
     WITH order_totals_cte AS (
       SELECT SUM(COALESCE(op.order_qty, 0)) as ordered_qty
       FROM order_products op
-      WHERE op.order_id = $1 AND op.order_qty_unit = 'YDQ' AND op.is_mix = true
+      WHERE op.order_id = $1 AND op.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op.is_mix = true
     ),
     ticket_data AS (
       SELECT
@@ -1078,7 +1078,7 @@ async function getTicketByCodeAndDate(orderCode, orderDate, ticketCode, tz = nul
     LEFT JOIN LATERAL (
       SELECT SUM(COALESCE(op.order_qty, 0)) as ordered_qty
       FROM order_products op
-      WHERE op.order_id = t.order_id AND op.order_qty_unit = 'YDQ' AND op.is_mix = true
+      WHERE op.order_id = t.order_id AND op.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op.is_mix = true
     ) order_totals ON true
     LEFT JOIN LATERAL (
       SELECT COUNT(*) + 1 as load_num
@@ -1110,7 +1110,7 @@ async function getTicketByCodeAndDate(orderCode, orderDate, ticketCode, tz = nul
     FROM order_product_schedules ops
     INNER JOIN order_products op ON op.id = ops.order_product_id
     WHERE op.order_id = $1
-      AND op.order_qty_unit = 'YDQ'
+      AND op.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3')
       AND op.is_mix = true
     ORDER BY ops.start_time ASC
     LIMIT 1

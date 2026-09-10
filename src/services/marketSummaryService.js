@@ -40,7 +40,7 @@ function buildFilteredOrdersCTE(dateFrom, dateTo, exclusionPatterns, userAccess)
 
     if (userAccess.allowedPlants && userAccess.allowedPlants.length > 0) {
       const placeholders = userAccess.allowedPlants.map((_, i) => `$${paramIndex + i}::text`).join(', ');
-      accessOrConditions.push(`EXISTS (SELECT 1 FROM order_products op_ac INNER JOIN order_product_schedules ops_ac ON ops_ac.order_product_id = op_ac.id WHERE op_ac.order_id = o.order_id AND (op_ac.order_qty_unit = 'YDQ' AND op_ac.is_mix = true) AND ops_ac.plant_code::text IN (${placeholders}))`);
+      accessOrConditions.push(`EXISTS (SELECT 1 FROM order_products op_ac INNER JOIN order_product_schedules ops_ac ON ops_ac.order_product_id = op_ac.id WHERE op_ac.order_id = o.order_id AND (op_ac.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op_ac.is_mix = true) AND ops_ac.plant_code::text IN (${placeholders}))`);
       queryParams.push(...userAccess.allowedPlants.map(p => String(p)));
       paramIndex += userAccess.allowedPlants.length;
     }
@@ -85,7 +85,7 @@ function buildFilteredOrdersCTE(dateFrom, dateTo, exclusionPatterns, userAccess)
           AND TRIM(o.remove_reason_code) <> '') as is_cancelled
     FROM orders o
     INNER JOIN order_products op ON op.order_id = o.order_id
-      AND op.order_qty_unit = 'YDQ' AND op.is_mix = true
+      AND op.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op.is_mix = true
     WHERE ${whereConditions.join(' AND ')}
     GROUP BY o.order_id, o.pricing_plant_code, o.removed, o.remove_reason_code
   )`;

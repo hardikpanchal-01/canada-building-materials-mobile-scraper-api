@@ -230,14 +230,14 @@ ${DB_SCHEMA}
 - Use CASE WHEN in SQL to compute ticket status.
 
 🚛 CONCRETE PRODUCT FILTERING (CRITICAL):
-- Concrete products: order_qty_unit = 'YDQ' AND is_mix = true (BOTH required).
-- When calculating order volumes (CY), only SUM products where order_qty_unit = 'YDQ' AND is_mix = true.
+- Concrete products: order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND is_mix = true (BOTH required).
+- When calculating order volumes (CY), only SUM products where order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND is_mix = true.
 - For ticket load quantity: prefer the product where is_mix = true; fallback to first product.
 - NEVER sum load_qty across multiple products in same ticket (they share the same load).
 
 📏 QUANTITY & PROGRESS CALCULATIONS:
-- Ordered quantity: SUM(op.order_qty) WHERE op.order_qty_unit = 'YDQ' AND op.is_mix = true.
-- Delivered quantity: SUM(op.delv_qty) WHERE op.order_qty_unit = 'YDQ' AND op.is_mix = true.
+- Ordered quantity: SUM(op.order_qty) WHERE op.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op.is_mix = true.
+- Delivered quantity: SUM(op.delv_qty) WHERE op.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op.is_mix = true.
 - Ticketed quantity: SUM of load_qty from tickets (using is_mix=true product per ticket).
 - Progress percentage: (delivered_qty / ordered_qty) * 100.
 - Remaining quantity: MAX(0, ordered_qty - delivered_qty).

@@ -11,6 +11,10 @@
  */
 
 const TENANT_CLIENTS = {
+  'canada-building-materials': {
+    name: 'Canada Building Materials',
+    client_secret: 'feb10dbdcb00bc512e0aa932c7e1cf2f4dca0b53d4861472c4ff6e6d48297a3e'
+  },
   dolese: {
     name: 'Dolese Ready Mix',
     client_secret: 'e96d8912fb26c684d360ed8e610fd9e7c140877299147950512e132ccf67ddb4'

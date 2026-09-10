@@ -5,7 +5,7 @@
  * Provides order listing, filtering, and detail retrieval.
  *
  * Filters applied:
- * 1. Only products with order_qty_unit = 'YDQ' AND is_mix = true (concrete mixes only)
+ * 1. Only products with order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND is_mix = true (concrete mixes only)
  * 2. Cancelled = removed=true AND remove_reason_code is non-empty (AND, not OR)
  * 3. Applies exclusion patterns from excluded_order_patterns table
  *    - Customer / Product / Delivery address: substring LIKE match
@@ -803,7 +803,7 @@ async function getOrders(params = {}, userAccess = null) {
       SELECT 1 FROM order_products op_pcf
       INNER JOIN order_product_schedules ops_pcf ON ops_pcf.order_product_id = op_pcf.id
       WHERE op_pcf.order_id = o.order_id
-        AND (op_pcf.order_qty_unit = 'YDQ' AND op_pcf.is_mix = true)
+        AND (op_pcf.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op_pcf.is_mix = true)
         AND ops_pcf.plant_code::text = $${paramIndex}
     )`);
     queryParams.push(plant_code.trim());
@@ -817,7 +817,7 @@ async function getOrders(params = {}, userAccess = null) {
       INNER JOIN order_product_schedules ops_pnf ON ops_pnf.order_product_id = op_pnf.id
       INNER JOIN plants p_pnf ON p_pnf.code = ops_pnf.plant_code
       WHERE op_pnf.order_id = o.order_id
-        AND (op_pnf.order_qty_unit = 'YDQ' AND op_pnf.is_mix = true)
+        AND (op_pnf.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op_pnf.is_mix = true)
         AND p_pnf.description ILIKE $${paramIndex}
     )`);
     queryParams.push(`%${plant_name.trim().toLowerCase()}%`);
@@ -836,7 +836,7 @@ async function getOrders(params = {}, userAccess = null) {
         SELECT 1 FROM order_products op_access
         INNER JOIN order_product_schedules ops_access ON ops_access.order_product_id = op_access.id
         WHERE op_access.order_id = o.order_id
-          AND (op_access.order_qty_unit = 'YDQ' AND op_access.is_mix = true)
+          AND (op_access.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op_access.is_mix = true)
           AND ops_access.plant_code::text IN (${plantPlaceholders})
       )`);
       queryParams.push(...userAccess.allowedPlants.map(p => String(p)));
@@ -1018,7 +1018,7 @@ async function getOrders(params = {}, userAccess = null) {
         STRING_AGG(DISTINCT op.description, ', ') FILTER (WHERE op.description IS NOT NULL AND op.description != '') as product_description
       FROM order_products op
       INNER JOIN orders o_ot ON o_ot.order_id = op.order_id
-      WHERE op.order_qty_unit = 'YDQ' AND op.is_mix = true
+      WHERE op.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op.is_mix = true
         AND o_ot.order_date >= $1 AND o_ot.order_date < $2
       GROUP BY op.order_id
     ),
@@ -1050,7 +1050,7 @@ async function getOrders(params = {}, userAccess = null) {
         WHERE opsl.order_product_schedule_id = ops.id
           AND COALESCE(t.end_unload, t.wash_time) IS NOT NULL
       ) sub ON true
-      WHERE (op.order_qty_unit = 'YDQ' AND op.is_mix = true)
+      WHERE (op.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op.is_mix = true)
         AND o_os.order_date >= $1 AND o_os.order_date < $2
       GROUP BY op.order_id
     ),
@@ -1062,7 +1062,7 @@ async function getOrders(params = {}, userAccess = null) {
       FROM order_products op
       INNER JOIN order_product_schedules ops ON ops.order_product_id = op.id
       INNER JOIN orders o_opl ON o_opl.order_id = op.order_id
-      WHERE (op.order_qty_unit = 'YDQ' AND op.is_mix = true)
+      WHERE (op.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op.is_mix = true)
         AND ops.plant_code IS NOT NULL
         AND o_opl.order_date >= $1 AND o_opl.order_date < $2
       GROUP BY op.order_id
@@ -1613,7 +1613,7 @@ async function getOrderByCodeAndDate(orderCode, orderDate, tz = null, loadsPagin
     INNER JOIN orders o ON o.order_id = op.order_id
     WHERE o.order_code = $1
       AND o.order_date >= $2::date AND o.order_date < ($2::date + INTERVAL '1 day')
-      AND (op.order_qty_unit = 'YDQ' AND op.is_mix = true)
+      AND (op.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op.is_mix = true)
     ORDER BY op.id
   `;
 
@@ -1644,7 +1644,7 @@ async function getOrderByCodeAndDate(orderCode, orderDate, tz = null, loadsPagin
     LEFT JOIN plants p ON p.code = ops.plant_code
     WHERE o.order_code = $1
       AND o.order_date >= $2::date AND o.order_date < ($2::date + INTERVAL '1 day')
-      AND (op.order_qty_unit = 'YDQ' AND op.is_mix = true)
+      AND (op.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op.is_mix = true)
     ORDER BY ops.start_time ASC
   `;
 
@@ -1740,7 +1740,7 @@ async function getOrderByCodeAndDate(orderCode, orderDate, tz = null, loadsPagin
     ) sp ON true
     WHERE o.order_code = $1
       AND o.order_date >= $2::date AND o.order_date < ($2::date + INTERVAL '1 day')
-      AND (op.order_qty_unit = 'YDQ' AND op.is_mix = true)
+      AND (op.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op.is_mix = true)
     ORDER BY tp.acc_delv_qty ASC NULLS LAST, ops.start_time ASC NULLS LAST
   `;
 
@@ -1775,7 +1775,7 @@ async function getOrderByCodeAndDate(orderCode, orderDate, tz = null, loadsPagin
       AND (t.remove_reason_code IS NULL OR TRIM(t.remove_reason_code) = '')
     WHERE o.order_code = $1
       AND o.order_date >= $2::date AND o.order_date < ($2::date + INTERVAL '1 day')
-      AND (op.order_qty_unit = 'YDQ' AND op.is_mix = true)
+      AND (op.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op.is_mix = true)
     GROUP BY ops.id, ops.start_time, ops.number_of_loads, ops.unload_time, ops.truck_space
     ORDER BY ops.start_time ASC
   `;
@@ -1804,7 +1804,7 @@ async function getOrderByCodeAndDate(orderCode, orderDate, tz = null, loadsPagin
   //
   // Fix: sort by op.id ASC, then ops.id ASC — exactly matching web.
   //
-  // IMPORTANT: do NOT filter on `order_qty_unit = 'YDQ'`. The web reducer
+  // IMPORTANT: do NOT filter on `order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3')`. The web reducer
   // (truckast-dolese-readymix-frontend/src/app/(protected)/orders/
   // _components/performance-charts.tsx lines 1511-1535 and 1751-1765)
   // ONLY filters by `is_mix` when selecting the primary schedule — it
@@ -1926,7 +1926,7 @@ async function getOrderByCodeAndDate(orderCode, orderDate, tz = null, loadsPagin
     LEFT JOIN plants p ON p.code = ops.plant_code
     WHERE o.order_code = $1
       AND o.order_date >= $2::date AND o.order_date < ($2::date + INTERVAL '1 day')
-      AND (op.order_qty_unit = 'YDQ' AND op.is_mix = true)
+      AND (op.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op.is_mix = true)
     ORDER BY ops.start_time ASC
   `;
 
@@ -2117,7 +2117,7 @@ async function getOrderByCodeAndDate(orderCode, orderDate, tz = null, loadsPagin
     ) tp ON true
     WHERE o.order_code = $1
       AND o.order_date >= $2::date AND o.order_date < ($2::date + INTERVAL '1 day')
-      AND (op.order_qty_unit = 'YDQ' AND op.is_mix = true)
+      AND (op.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op.is_mix = true)
     ORDER BY opsl.schedule_load_id ASC
     LIMIT $3 OFFSET $4
   `;
@@ -2143,7 +2143,7 @@ async function getOrderByCodeAndDate(orderCode, orderDate, tz = null, loadsPagin
     LEFT JOIN tickets t ON t.ticket_code = opsl.ticket_code AND t.order_id = o.order_id
     WHERE o.order_code = $1
       AND o.order_date >= $2::date AND o.order_date < ($2::date + INTERVAL '1 day')
-      AND (op.order_qty_unit = 'YDQ' AND op.is_mix = true)
+      AND (op.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op.is_mix = true)
   `;
 
   // Calculate pagination offset
@@ -2899,7 +2899,7 @@ async function getOrdersSummary(params = {}, userAccess = null) {
       SELECT 1 FROM order_products op_pcf
       INNER JOIN order_product_schedules ops_pcf ON ops_pcf.order_product_id = op_pcf.id
       WHERE op_pcf.order_id = o.order_id
-        AND (op_pcf.order_qty_unit = 'YDQ' AND op_pcf.is_mix = true)
+        AND (op_pcf.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op_pcf.is_mix = true)
         AND ops_pcf.plant_code::text = $${paramIndex}
     )`;
     queryParams.push(plant_code.trim());
@@ -2913,7 +2913,7 @@ async function getOrdersSummary(params = {}, userAccess = null) {
       INNER JOIN order_product_schedules ops_pnf ON ops_pnf.order_product_id = op_pnf.id
       INNER JOIN plants p_pnf ON p_pnf.code = ops_pnf.plant_code
       WHERE op_pnf.order_id = o.order_id
-        AND (op_pnf.order_qty_unit = 'YDQ' AND op_pnf.is_mix = true)
+        AND (op_pnf.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op_pnf.is_mix = true)
         AND p_pnf.description ILIKE $${paramIndex}
     )`;
     queryParams.push(`%${plant_name.trim().toLowerCase()}%`);
@@ -2928,7 +2928,7 @@ async function getOrdersSummary(params = {}, userAccess = null) {
 
     if (userAccess.allowedPlants && userAccess.allowedPlants.length > 0) {
       const placeholders = userAccess.allowedPlants.map((_, i) => `$${paramIndex + i}::text`).join(', ');
-      accessOrParts.push(`EXISTS (SELECT 1 FROM order_products op_ac INNER JOIN order_product_schedules ops_ac ON ops_ac.order_product_id = op_ac.id WHERE op_ac.order_id = o.order_id AND (op_ac.order_qty_unit = 'YDQ' AND op_ac.is_mix = true) AND ops_ac.plant_code::text IN (${placeholders}))`);
+      accessOrParts.push(`EXISTS (SELECT 1 FROM order_products op_ac INNER JOIN order_product_schedules ops_ac ON ops_ac.order_product_id = op_ac.id WHERE op_ac.order_id = o.order_id AND (op_ac.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op_ac.is_mix = true) AND ops_ac.plant_code::text IN (${placeholders}))`);
       queryParams.push(...userAccess.allowedPlants.map(p => String(p)));
       paramIndex += userAccess.allowedPlants.length;
     }
@@ -2968,7 +2968,7 @@ async function getOrdersSummary(params = {}, userAccess = null) {
         SUM(COALESCE(op.delv_qty, 0)) as delivered_qty
       FROM orders o
       INNER JOIN order_products op ON op.order_id = o.order_id
-        AND op.order_qty_unit = 'YDQ' AND op.is_mix = true
+        AND op.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op.is_mix = true
       WHERE o.order_date >= $1::date
         AND o.order_date < ($2::date + INTERVAL '1 day')
         ${extraConditions}
@@ -3180,7 +3180,7 @@ async function getActiveTrackingOrders(params = {}, userAccess = null) {
       SELECT 1 FROM order_products op_pcf
       INNER JOIN order_product_schedules ops_pcf ON ops_pcf.order_product_id = op_pcf.id
       WHERE op_pcf.order_id = o.order_id
-        AND (op_pcf.order_qty_unit = 'YDQ' AND op_pcf.is_mix = true)
+        AND (op_pcf.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op_pcf.is_mix = true)
         AND ops_pcf.plant_code::text = $${paramIndex}
     )`);
     queryParams.push(plant_code.trim());
@@ -3194,7 +3194,7 @@ async function getActiveTrackingOrders(params = {}, userAccess = null) {
       INNER JOIN order_product_schedules ops_pnf ON ops_pnf.order_product_id = op_pnf.id
       INNER JOIN plants p_pnf ON p_pnf.code = ops_pnf.plant_code
       WHERE op_pnf.order_id = o.order_id
-        AND (op_pnf.order_qty_unit = 'YDQ' AND op_pnf.is_mix = true)
+        AND (op_pnf.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op_pnf.is_mix = true)
         AND p_pnf.description ILIKE $${paramIndex}
     )`);
     queryParams.push(`%${plant_name.trim().toLowerCase()}%`);
@@ -3207,7 +3207,7 @@ async function getActiveTrackingOrders(params = {}, userAccess = null) {
 
     if (userAccess.allowedPlants && userAccess.allowedPlants.length > 0) {
       const placeholders = userAccess.allowedPlants.map((_, i) => `$${paramIndex + i}::text`).join(', ');
-      accessOrConditions.push(`EXISTS (SELECT 1 FROM order_products op_access INNER JOIN order_product_schedules ops_access ON ops_access.order_product_id = op_access.id WHERE op_access.order_id = o.order_id AND (op_access.order_qty_unit = 'YDQ' AND op_access.is_mix = true) AND ops_access.plant_code::text IN (${placeholders}))`);
+      accessOrConditions.push(`EXISTS (SELECT 1 FROM order_products op_access INNER JOIN order_product_schedules ops_access ON ops_access.order_product_id = op_access.id WHERE op_access.order_id = o.order_id AND (op_access.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op_access.is_mix = true) AND ops_access.plant_code::text IN (${placeholders}))`);
       queryParams.push(...userAccess.allowedPlants.map(p => String(p)));
       paramIndex += userAccess.allowedPlants.length;
     }
@@ -3247,7 +3247,7 @@ async function getActiveTrackingOrders(params = {}, userAccess = null) {
         STRING_AGG(DISTINCT op.description, ', ') FILTER (WHERE op.description IS NOT NULL AND op.description != '') as product_description
       FROM order_products op
       INNER JOIN orders o_ot ON o_ot.order_id = op.order_id
-      WHERE op.order_qty_unit = 'YDQ'
+      WHERE op.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3')
         AND o_ot.order_date >= $1::date AND o_ot.order_date < ($2::date + INTERVAL '1 day')
       GROUP BY op.order_id
     ),
@@ -3278,7 +3278,7 @@ async function getActiveTrackingOrders(params = {}, userAccess = null) {
         WHERE opsl.order_product_schedule_id = ops.id
           AND COALESCE(t.end_unload, t.wash_time) IS NOT NULL
       ) sub ON true
-      WHERE (op.order_qty_unit = 'YDQ' AND op.is_mix = true)
+      WHERE (op.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op.is_mix = true)
         AND o_os.order_date >= $1::date AND o_os.order_date < ($2::date + INTERVAL '1 day')
       GROUP BY op.order_id
     ),
@@ -4856,7 +4856,7 @@ async function getOrderTrackingById(orderId, params = {}, userAccess = null) {
 
     if (userAccess.allowedPlants?.length > 0) {
       const placeholders = userAccess.allowedPlants.map((_, i) => `$${paramIdx + i}::text`).join(', ');
-      accessOrParts.push(`EXISTS (SELECT 1 FROM order_products op INNER JOIN order_product_schedules ops ON ops.order_product_id = op.id WHERE op.order_id = o.order_id AND (op.order_qty_unit = 'YDQ' AND op.is_mix = true) AND ops.plant_code::text IN (${placeholders}))`);
+      accessOrParts.push(`EXISTS (SELECT 1 FROM order_products op INNER JOIN order_product_schedules ops ON ops.order_product_id = op.id WHERE op.order_id = o.order_id AND (op.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op.is_mix = true) AND ops.plant_code::text IN (${placeholders}))`);
       accessParams.push(...userAccess.allowedPlants.map(p => String(p)));
       paramIdx += userAccess.allowedPlants.length;
     }
@@ -4942,7 +4942,7 @@ async function getOrderTrackingById(orderId, params = {}, userAccess = null) {
       STRING_AGG(DISTINCT op.description, ', ') FILTER (WHERE op.description IS NOT NULL AND op.description != '') as product_description
     FROM order_products op
     WHERE op.order_id = $1
-      AND (op.order_qty_unit = 'YDQ' AND op.is_mix = true)
+      AND (op.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op.is_mix = true)
   `;
 
   // Query to count total tickets and status counts
@@ -5294,7 +5294,7 @@ async function getScheduledLoadsByOrder(orderCode, orderDate, tz = null, paginat
     ) tp ON true
     WHERE o.order_code = $1
       AND o.order_date >= $2::date AND o.order_date < ($2::date + INTERVAL '1 day')
-      AND (op.order_qty_unit = 'YDQ' AND op.is_mix = true)
+      AND (op.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op.is_mix = true)
     ORDER BY opsl.schedule_load_id ASC
     LIMIT $3 OFFSET $4
   `;
@@ -5320,7 +5320,7 @@ async function getScheduledLoadsByOrder(orderCode, orderDate, tz = null, paginat
     LEFT JOIN tickets t ON t.ticket_code = opsl.ticket_code AND t.order_id = o.order_id
     WHERE o.order_code = $1
       AND o.order_date >= $2::date AND o.order_date < ($2::date + INTERVAL '1 day')
-      AND (op.order_qty_unit = 'YDQ' AND op.is_mix = true)
+      AND (op.order_qty_unit IN ('YDQ', 'CY', 'm3', 'M3') AND op.is_mix = true)
   `;
 
   const page = pagination.page || 1;
