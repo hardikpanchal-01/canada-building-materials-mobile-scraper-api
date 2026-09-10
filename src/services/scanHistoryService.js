@@ -4,7 +4,7 @@
  * CRUD operations for user-scoped QR scan history.
  */
 
-const { getDbAdmin } = require('../config/database');
+const { executeDirectSQL } = require('../utils/postgresExecutor');
 
 const TABLE = 'scan_history';
 
@@ -15,18 +15,29 @@ const TABLE = 'scan_history';
  * @param {number} limit - records per page (default 20, max 100)
  */
 async function getHistory(userId, page = 1, limit = 20) {
-  const dbClient = getDbAdmin();
   const pageNum = Math.max(1, parseInt(page, 10) || 1);
   const limitNum = Math.min(Math.max(1, parseInt(limit, 10) || 20), 100);
   const offset = (pageNum - 1) * limitNum;
 
-  // Single query: fetch paginated records + exact total count
-  const { data, count, error } = await dbClient
-    .from(TABLE)
-    .select('*', { count: 'exact' })
-    .eq('user_id', userId)
-    .order('timestamp', { ascending: false })
-    .range(offset, offset + limitNum - 1);
+  // Fetch paginated records + exact total count
+  let data = null;
+  let count = null;
+  let error = null;
+  try {
+    const countResult = await executeDirectSQL(
+      `SELECT count(*)::int AS count FROM ${TABLE} WHERE user_id = $1`,
+      [userId]
+    );
+    count = countResult.data[0]?.count ?? 0;
+
+    const dataResult = await executeDirectSQL(
+      `SELECT * FROM ${TABLE} WHERE user_id = $1 ORDER BY "timestamp" DESC LIMIT $2 OFFSET $3`,
+      [userId, limitNum, offset]
+    );
+    data = dataResult.data;
+  } catch (e) {
+    error = e;
+  }
 
   console.log('[ScanHistory] getHistory — userId:', userId, '| records:', data?.length, '| count:', count, '| page:', pageNum, '| offset:', offset, '| limit:', limitNum, '| error:', error?.message);
 
@@ -55,8 +66,6 @@ async function getHistory(userId, page = 1, limit = 20) {
  * Save a new scan record.
  */
 async function saveScan(userId, record) {
-  const dbClient = getDbAdmin();
-
   const row = {
     user_id: userId,
     scan_id: record.id,
@@ -69,13 +78,30 @@ async function saveScan(userId, record) {
     api_data: record.apiData || null,
   };
 
-  const { data, error } = await dbClient
-    .from(TABLE)
-    .upsert(row, { onConflict: 'user_id,scan_id' })
-    .select()
-    .single();
-
-  if (error) {
+  let data;
+  try {
+    const result = await executeDirectSQL(
+      `INSERT INTO ${TABLE} (user_id, scan_id, data, type, "timestamp", label, verified, tk_data, api_data)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb)
+       ON CONFLICT (user_id, scan_id)
+       DO UPDATE SET
+         data = EXCLUDED.data,
+         type = EXCLUDED.type,
+         "timestamp" = EXCLUDED."timestamp",
+         label = EXCLUDED.label,
+         verified = EXCLUDED.verified,
+         tk_data = EXCLUDED.tk_data,
+         api_data = EXCLUDED.api_data
+       RETURNING *`,
+      [
+        row.user_id, row.scan_id, row.data, row.type, row.timestamp,
+        row.label, row.verified,
+        row.tk_data != null ? JSON.stringify(row.tk_data) : null,
+        row.api_data != null ? JSON.stringify(row.api_data) : null,
+      ]
+    );
+    data = result.data[0];
+  } catch (error) {
     console.error('[ScanHistory] saveScan error:', error.message);
     throw new Error('Failed to save scan record');
   }
@@ -87,15 +113,14 @@ async function saveScan(userId, record) {
  * Delete a single scan record by client scan_id.
  */
 async function deleteScan(userId, scanId) {
-  const dbClient = getDbAdmin();
-
-  const { error, count } = await dbClient
-    .from(TABLE)
-    .delete()
-    .eq('user_id', userId)
-    .eq('scan_id', scanId);
-
-  if (error) {
+  let count;
+  try {
+    const result = await executeDirectSQL(
+      `DELETE FROM ${TABLE} WHERE user_id = $1 AND scan_id = $2`,
+      [userId, scanId]
+    );
+    count = result.rowCount;
+  } catch (error) {
     console.error('[ScanHistory] deleteScan error:', error.message);
     throw new Error('Failed to delete scan record');
   }
@@ -107,14 +132,14 @@ async function deleteScan(userId, scanId) {
  * Clear all scan history for a user.
  */
 async function clearHistory(userId) {
-  const dbClient = getDbAdmin();
-
-  const { error, count } = await dbClient
-    .from(TABLE)
-    .delete()
-    .eq('user_id', userId);
-
-  if (error) {
+  let count;
+  try {
+    const result = await executeDirectSQL(
+      `DELETE FROM ${TABLE} WHERE user_id = $1`,
+      [userId]
+    );
+    count = result.rowCount;
+  } catch (error) {
     console.error('[ScanHistory] clearHistory error:', error.message);
     throw new Error('Failed to clear scan history');
   }
@@ -130,7 +155,8 @@ function mapRowToRecord(row) {
     id: row.scan_id,
     data: row.data,
     type: row.type,
-    timestamp: row.timestamp,
+    // pg returns bigint columns as strings; mobile app expects a numeric timestamp
+    timestamp: row.timestamp != null ? Number(row.timestamp) : row.timestamp,
     label: row.label || undefined,
     verified: row.verified || undefined,
     tkData: row.tk_data || undefined,

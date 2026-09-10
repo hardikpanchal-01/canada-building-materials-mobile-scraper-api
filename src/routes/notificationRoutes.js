@@ -35,6 +35,9 @@ router.post('/send-order', authenticate, orderNotificationController.sendOrderNo
  */
 router.get('/history', authenticate, notificationQueueController.getNotifications);
 
+router.put('/read/:queueUuid', authenticate, notificationQueueController.markAsRead);
+router.put('/read-all', authenticate, notificationQueueController.markAllAsRead);
+
 /**
  * @route   GET /api/notifications/recent
  * @desc    Get the authenticated user's recent notifications (mobile Notifications screen)

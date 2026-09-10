@@ -1,4 +1,5 @@
 const { getDb, getDbAdmin } = require('../config/database');
+const { executeDirectSQL } = require('../utils/postgresExecutor');
 const { generateAccessToken, generateRefreshToken, verifyAccessToken, verifyRefreshToken } = require('../utils/jwtUtils');
 const deviceService = require('./deviceService');
 const { loadUserAccessData } = require('../middleware/auth');
@@ -13,7 +14,6 @@ const { loadUserAccessData } = require('../middleware/auth');
 async function loginWithEmail(email, password, deviceInfo = null) {
   try {
     const dbClient = getDb();
-    const dbAdmin = getDbAdmin();
     const normalizedEmail = email.toLowerCase().trim();
 
     // ---------------------------------------------------------------
@@ -21,14 +21,14 @@ async function loginWithEmail(email, password, deviceInfo = null) {
     // ---------------------------------------------------------------
 
     // Check if user is still in signup_pending (incomplete signup)
-    const { data: pendingSignup } = await dbAdmin
-      .from('signup_pending')
-      .select('email_verified, phone_number, phone_country_code')
-      .eq('email', normalizedEmail)
-      .limit(1);
+    const pendingResult = await executeDirectSQL(
+      `SELECT email_verified, phone_number, phone_country_code
+       FROM signup_pending WHERE email = $1 LIMIT 1`,
+      [normalizedEmail]
+    );
 
-    if (pendingSignup && pendingSignup.length > 0) {
-      const pending = pendingSignup[0];
+    if (pendingResult.data.length > 0) {
+      const pending = pendingResult.data[0];
       if (!pending.email_verified) {
         throw new Error('Email not verified. Please complete email verification first.');
       }
@@ -40,18 +40,17 @@ async function loginWithEmail(email, password, deviceInfo = null) {
     }
 
     // Check if user exists in database
-    const { data: userProfile } = await dbAdmin
-      .from('users')
-      .select('active, user_type')
-      .eq('email', normalizedEmail)
-      .limit(1);
+    const profileResult = await executeDirectSQL(
+      'SELECT active, user_type FROM users WHERE email = $1 LIMIT 1',
+      [normalizedEmail]
+    );
 
-    if (!userProfile || userProfile.length === 0) {
+    if (profileResult.data.length === 0) {
       throw new Error('User not found');
     }
 
     // Check admin approval — ONLY for QR signup users
-    const profile = userProfile[0];
+    const profile = profileResult.data[0];
     if (profile.user_type === 'QR' && !profile.active) {
       throw new Error('Your account is pending admin approval. You will be notified via email or phone once approved.');
     }
@@ -131,13 +130,12 @@ async function loginWithPhone(phone, password, deviceInfo = null) {
     if (authUsers?.users) {
       const matchedAuth = authUsers.users.find(u => u.phone === phone);
       if (matchedAuth?.email) {
-        const { data: userProfile } = await dbAdmin
-          .from('users')
-          .select('active')
-          .eq('email', matchedAuth.email.toLowerCase())
-          .limit(1);
+        const profileResult = await executeDirectSQL(
+          'SELECT active FROM users WHERE email = $1 LIMIT 1',
+          [matchedAuth.email.toLowerCase()]
+        );
 
-        if (userProfile && userProfile.length > 0 && !userProfile[0].active) {
+        if (profileResult.data.length > 0 && !profileResult.data[0].active) {
           throw new Error('Your account is pending admin approval. You will be notified via email or phone once approved.');
         }
       }

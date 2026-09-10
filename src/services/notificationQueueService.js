@@ -1,7 +1,9 @@
-const { getNotificationDb } = require('../config/notificationDatabase');
+const { executeDirectSQL } = require('../utils/postgresExecutor');
 
 /**
- * Get notifications for a user filtered by tenant with pagination
+ * Get notifications for a user filtered by tenant with pagination.
+ * Queries the notification_queue table via direct PostgreSQL.
+ *
  * @param {string} userId - User UUID
  * @param {number} tenantId - Tenant ID
  * @param {number} page - Page number (1-based)
@@ -9,63 +11,86 @@ const { getNotificationDb } = require('../config/notificationDatabase');
  * @returns {Object} { notifications, total, page, limit, totalPages }
  */
 async function getNotifications(userId, tenantId, page = 1, limit = 50) {
-  const dbClient = getNotificationDb();
+  const offset = (page - 1) * limit;
 
-  const from = (page - 1) * limit;
-  const to = from + limit - 1;
+  // Resolve both the central-auth ID and the tenant-local ID so notifications
+  // stored under either UUID are returned.
+  const userIds = [userId];
+  try {
+    const mapped = await executeDirectSQL(
+      `SELECT id::text FROM users WHERE email = (SELECT email FROM auth.users WHERE id = $1::uuid) AND id::text <> $1::text LIMIT 1`,
+      [userId]
+    );
+    if (mapped.data?.[0]?.id) userIds.push(mapped.data[0].id);
+  } catch (_) {}
 
-  const { data, error, count } = await dbClient
-    .from('notification_queue')
-    .select('*', { count: 'exact' })
-    .eq('user_id', userId)
-    .eq('tenant_id', tenantId)
-    .order('created_at', { ascending: false })
-    .range(from, to);
+  const countParams = [userIds];
+  let countWhere = 'WHERE user_id::text = ANY($1)';
+  if (tenantId) {
+    countParams.push(tenantId);
+    countWhere += ` AND tenant_id = $${countParams.length}`;
+  }
 
-  if (error) throw new Error(`Failed to fetch notifications: ${error.message}`);
+  const countResult = await executeDirectSQL(
+    `SELECT COUNT(*) AS total FROM notification_queue ${countWhere}`,
+    countParams
+  );
+  const total = parseInt(countResult.data[0]?.total || '0', 10);
+
+  const dataParams = [...countParams, limit, offset];
+  const dataResult = await executeDirectSQL(
+    `SELECT * FROM notification_queue ${countWhere}
+     ORDER BY created_at DESC
+     LIMIT $${dataParams.length - 1} OFFSET $${dataParams.length}`,
+    dataParams
+  );
 
   return {
-    notifications: data || [],
-    total: count || 0,
+    notifications: dataResult.data || [],
+    total,
     page,
     limit,
-    totalPages: Math.ceil((count || 0) / limit)
+    totalPages: Math.ceil(total / limit)
   };
 }
 
 /**
- * Get the authenticated user's recent notifications (across the tenant), paginated.
- * Filters by user_id only (the central JWT id, which is how notification_queue.user_id
- * is keyed) — used by the mobile Notifications screen (GET /api/notifications/recent).
- * @param {string} userId - User UUID (central auth id)
- * @param {number} page
- * @param {number} limit
+ * Mark a single notification as read by queue_uuid
  */
-async function getRecentNotifications(userId, page = 1, limit = 20) {
-  const dbClient = getNotificationDb();
+async function markAsRead(queueUuid, userId) {
+  const now = new Date().toISOString();
+  const result = await executeDirectSQL(
+    `UPDATE notification_queue
+     SET status = 'delivered', delivered_at = $1, updated_at = $1
+     WHERE queue_uuid = $2 AND user_id = $3
+     RETURNING *`,
+    [now, queueUuid, userId]
+  );
 
-  const from = (page - 1) * limit;
-  const to = from + limit - 1;
+  if (!result.data || result.data.length === 0) {
+    throw new Error('Notification not found');
+  }
+  return result.data[0];
+}
 
-  const { data, error, count } = await dbClient
-    .from('notification_queue')
-    .select('*', { count: 'exact' })
-    .eq('user_id', userId)
-    .order('created_at', { ascending: false })
-    .range(from, to);
+/**
+ * Mark all notifications as read for a user in a tenant
+ */
+async function markAllAsRead(userId, tenantId) {
+  const now = new Date().toISOString();
+  const result = await executeDirectSQL(
+    `UPDATE notification_queue
+     SET status = 'delivered', delivered_at = $1, updated_at = $1
+     WHERE user_id = $2 AND tenant_id = $3 AND status = 'pending'
+     RETURNING id`,
+    [now, userId, tenantId]
+  );
 
-  if (error) throw new Error(`Failed to fetch notifications: ${error.message}`);
-
-  return {
-    notifications: data || [],
-    total: count || 0,
-    page,
-    limit,
-    totalPages: Math.ceil((count || 0) / limit)
-  };
+  return { updated: result.data?.length || 0 };
 }
 
 module.exports = {
   getNotifications,
-  getRecentNotifications
+  markAsRead,
+  markAllAsRead
 };

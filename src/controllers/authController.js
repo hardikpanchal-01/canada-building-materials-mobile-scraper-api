@@ -1206,17 +1206,15 @@ async function resendEmailOtp(req, res) {
       return res.status(400).json({ success: false, message: 'Email is required' });
     }
 
-    const { getDbAdmin } = require('../config/database');
-    const dbClient = getDbAdmin();
+    const { executeDirectSQL } = require('../utils/postgresExecutor');
 
     // Ensure there is a pending signup
-    const { data: pending } = await dbClient
-      .from('signup_pending')
-      .select('email')
-      .eq('email', email.toLowerCase().trim())
-      .limit(1);
+    const pendingResult = await executeDirectSQL(
+      'SELECT email FROM signup_pending WHERE email = $1 LIMIT 1',
+      [email.toLowerCase().trim()]
+    );
 
-    if (!pending || pending.length === 0) {
+    if (pendingResult.data.length === 0) {
       return res.status(404).json({ success: false, message: 'No pending signup found. Please sign up first.' });
     }
 
@@ -1269,17 +1267,16 @@ async function resendPhoneOtp(req, res) {
       return res.status(400).json({ success: false, message: 'Email is required' });
     }
 
-    const { getDbAdmin } = require('../config/database');
-    const dbClient = getDbAdmin();
+    const { executeDirectSQL } = require('../utils/postgresExecutor');
     const normalizedEmail = email.toLowerCase().trim();
 
-    const { data: pending } = await dbClient
-      .from('signup_pending')
-      .select('*')
-      .eq('email', normalizedEmail)
-      .limit(1);
+    const pendingResult = await executeDirectSQL(
+      'SELECT * FROM signup_pending WHERE email = $1 LIMIT 1',
+      [normalizedEmail]
+    );
+    const pending = pendingResult.data;
 
-    if (!pending || pending.length === 0) {
+    if (pending.length === 0) {
       return res.status(404).json({ success: false, message: 'No pending signup found.' });
     }
 

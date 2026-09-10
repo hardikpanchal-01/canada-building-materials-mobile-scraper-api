@@ -6,9 +6,17 @@
  * storage gateway via a thin fetch client (no hosted SDK). The public function
  * contracts (uploadToStorage / uploadAvatarToStorage / deleteAvatarFromStorage
  * returning { path, publicUrl } and the bucket-name exports) are unchanged.
+ *
+ * When DATA_GATEWAY_URL is NOT set, falls back to local file storage under
+ * public/uploads/ (development). Files are served via Express static middleware.
  */
 
-const { makeStorage } = require('../../db/restFetch');
+const fs = require('fs');
+const fsp = require('fs').promises;
+const path = require('path');
+
+let makeStorage;
+try { makeStorage = require('../../db/restFetch').makeStorage; } catch { makeStorage = null; }
 
 const STORAGE_URL = process.env.DATA_GATEWAY_URL;
 const STORAGE_SERVICE_KEY = process.env.DATA_GATEWAY_SERVICE_KEY || process.env.DATA_GATEWAY_ANON_KEY;
@@ -18,10 +26,8 @@ const STORAGE_TIMEOUT_MS = parseInt(process.env.STORAGE_TIMEOUT_MS) || 30000;
 
 // Only build the storage client if credentials are provided.
 let storage = null;
-if (STORAGE_URL && STORAGE_SERVICE_KEY) {
+if (STORAGE_URL && STORAGE_SERVICE_KEY && makeStorage) {
   storage = makeStorage({ url: STORAGE_URL, serviceKey: STORAGE_SERVICE_KEY });
-} else {
-  console.warn('⚠️  Storage credentials not configured - storage features will be unavailable');
 }
 
 /** Storage bucket name for scraped orders */
@@ -29,6 +35,21 @@ const SCRAPED_ORDERS_BUCKET = 'scraped-orders';
 
 /** Storage bucket name for user avatars */
 const AVATARS_BUCKET = 'avatars';
+
+// Local file storage fallback
+const USE_LOCAL_STORAGE = !storage;
+const LOCAL_UPLOADS_DIR = path.join(__dirname, '..', '..', '..', 'public', 'uploads');
+
+if (USE_LOCAL_STORAGE) {
+  fs.mkdirSync(path.join(LOCAL_UPLOADS_DIR, AVATARS_BUCKET), { recursive: true });
+  fs.mkdirSync(path.join(LOCAL_UPLOADS_DIR, SCRAPED_ORDERS_BUCKET), { recursive: true });
+  console.warn('⚠️  Storage credentials not configured - using local file storage (public/uploads/)');
+}
+
+function localUrlFor(key) {
+  const port = process.env.PORT || 5000;
+  return `http://localhost:${port}/uploads/${key}`;
+}
 
 /**
  * Upload JSON data to object storage with timeout protection
@@ -39,8 +60,13 @@ const AVATARS_BUCKET = 'avatars';
  * @returns {Promise<{path: string, publicUrl: string}>} Upload result
  */
 async function uploadToStorage(fileName, data, timeoutMs = STORAGE_TIMEOUT_MS) {
-  if (!storage) {
-    throw new Error('Storage client not configured. Please set DATA_GATEWAY_URL and DATA_GATEWAY_SERVICE_KEY.');
+  const key = `${SCRAPED_ORDERS_BUCKET}/${fileName}`;
+
+  if (USE_LOCAL_STORAGE) {
+    const filePath = path.join(LOCAL_UPLOADS_DIR, key);
+    await fsp.mkdir(path.dirname(filePath), { recursive: true });
+    await fsp.writeFile(filePath, JSON.stringify(data, null, 2), 'utf-8');
+    return { path: key, publicUrl: localUrlFor(key) };
   }
 
   const jsonContent = JSON.stringify(data, null, 2);
@@ -96,12 +122,16 @@ async function uploadToStorage(fileName, data, timeoutMs = STORAGE_TIMEOUT_MS) {
  * @returns {Promise<{path: string, publicUrl: string}>} Upload result
  */
 async function uploadAvatarToStorage(userId, fileBuffer, mimeType, originalName) {
-  if (!storage) {
-    throw new Error('Storage client not configured. Please set DATA_GATEWAY_URL and DATA_GATEWAY_SERVICE_KEY.');
-  }
-
   const ext = originalName.split('.').pop().toLowerCase();
   const fileName = `${userId}/avatar_${Date.now()}.${ext}`;
+  const key = `${AVATARS_BUCKET}/${fileName}`;
+
+  if (USE_LOCAL_STORAGE) {
+    const filePath = path.join(LOCAL_UPLOADS_DIR, key);
+    await fsp.mkdir(path.dirname(filePath), { recursive: true });
+    await fsp.writeFile(filePath, fileBuffer);
+    return { path: key, publicUrl: localUrlFor(key) };
+  }
 
   const uploadPromise = storage
     .from(AVATARS_BUCKET)
@@ -143,8 +173,16 @@ async function uploadAvatarToStorage(userId, fileBuffer, mimeType, originalName)
  * @returns {Promise<void>}
  */
 async function deleteAvatarFromStorage(filePath) {
-  if (!storage) {
-    throw new Error('Storage client not configured.');
+  const key = filePath.startsWith(`${AVATARS_BUCKET}/`) ? filePath : `${AVATARS_BUCKET}/${filePath}`;
+
+  if (USE_LOCAL_STORAGE) {
+    try {
+      const localPath = path.join(LOCAL_UPLOADS_DIR, key);
+      await fsp.access(localPath).then(() => fsp.unlink(localPath)).catch(() => {});
+    } catch (error) {
+      console.warn('Failed to delete local avatar:', error.message);
+    }
+    return;
   }
 
   const { error } = await storage

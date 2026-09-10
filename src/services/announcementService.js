@@ -1,4 +1,4 @@
-const { getDbAdmin } = require('../config/database');
+const { executeDirectSQL } = require('../utils/postgresExecutor');
 
 /**
  * Get plant_ids for a user based on their roles
@@ -7,15 +7,17 @@ const { getDbAdmin } = require('../config/database');
  * @returns {Array<number>} Array of plant_ids the user has access to
  */
 async function getUserPlantIds(userId) {
-  const dbClient = getDbAdmin();
-
   // Get role_ids for the user from user_roles table
-  const { data: userRoles, error: userRolesError } = await dbClient
-    .from('user_roles')
-    .select('role_id')
-    .eq('user_id', userId);
-
-  if (userRolesError) throw new Error(`Failed to fetch user roles: ${userRolesError.message}`);
+  let userRoles;
+  try {
+    const result = await executeDirectSQL(
+      'SELECT role_id FROM user_roles WHERE user_id = $1',
+      [userId]
+    );
+    userRoles = result.data;
+  } catch (userRolesError) {
+    throw new Error(`Failed to fetch user roles: ${userRolesError.message}`);
+  }
 
   if (!userRoles || userRoles.length === 0) {
     return [];
@@ -24,12 +26,16 @@ async function getUserPlantIds(userId) {
   const roleIds = userRoles.map(ur => ur.role_id);
 
   // Get plant_ids for those roles from role_plants table
-  const { data: rolePlants, error: rolePlantsError } = await dbClient
-    .from('role_plants')
-    .select('plant_id')
-    .in('role_id', roleIds);
-
-  if (rolePlantsError) throw new Error(`Failed to fetch role plants: ${rolePlantsError.message}`);
+  let rolePlants;
+  try {
+    const result = await executeDirectSQL(
+      'SELECT plant_id FROM role_plants WHERE role_id = ANY($1)',
+      [roleIds]
+    );
+    rolePlants = result.data;
+  } catch (rolePlantsError) {
+    throw new Error(`Failed to fetch role plants: ${rolePlantsError.message}`);
+  }
 
   if (!rolePlants || rolePlants.length === 0) {
     return [];
@@ -51,8 +57,6 @@ async function getUserPlantIds(userId) {
  * @returns {Object} { announcements, total, page, limit, totalPages, userPlantIds }
  */
 async function getAnnouncementsForUser(userId, filters = {}, page = 1, limit = 50) {
-  const dbClient = getDbAdmin();
-
   // Get user's plant_ids
   const userPlantIds = await getUserPlantIds(userId);
 
@@ -68,35 +72,47 @@ async function getAnnouncementsForUser(userId, filters = {}, page = 1, limit = 5
   }
 
   const from = (page - 1) * limit;
-  const to = from + limit - 1;
   const now = new Date().toISOString();
 
   // Build query for published announcements
   // that have at least one plant_id matching user's plant_ids
-  let query = dbClient
-    .from('announcements')
-    .select('*', { count: 'exact' })
-    .eq('published', true)
-    .overlaps('plant_ids', userPlantIds);
+  const whereClauses = ['published = true', 'plant_ids && $1'];
+  const params = [userPlantIds];
 
   // Filter by active status (current date within start_date and end_date)
   if (filters.active === true) {
     // Active: start_date <= now AND end_date >= now (or null)
-    query = query
-      .or(`start_date.is.null,start_date.lte.${now}`)
-      .or(`end_date.is.null,end_date.gte.${now}`);
+    params.push(now);
+    whereClauses.push(`(start_date IS NULL OR start_date <= $${params.length})`);
+    whereClauses.push(`(end_date IS NULL OR end_date >= $${params.length})`);
   } else if (filters.active === false) {
     // Inactive: start_date > now OR end_date < now
-    query = query
-      .or(`start_date.gt.${now},end_date.lt.${now}`);
+    params.push(now);
+    whereClauses.push(`(start_date > $${params.length} OR end_date < $${params.length})`);
   }
   // If filters.active is undefined, return all (no date filter)
 
-  const { data, error, count } = await query
-    .order('created_at', { ascending: false })
-    .range(from, to);
+  const whereSql = whereClauses.join(' AND ');
 
-  if (error) throw new Error(`Failed to fetch announcements: ${error.message}`);
+  let data;
+  let count;
+  try {
+    const countResult = await executeDirectSQL(
+      `SELECT count(*)::int AS count FROM announcements WHERE ${whereSql}`,
+      params
+    );
+    count = countResult.data[0]?.count ?? 0;
+
+    const dataResult = await executeDirectSQL(
+      `SELECT * FROM announcements WHERE ${whereSql}
+       ORDER BY created_at DESC
+       LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+      [...params, limit, from]
+    );
+    data = dataResult.data;
+  } catch (error) {
+    throw new Error(`Failed to fetch announcements: ${error.message}`);
+  }
 
   return {
     announcements: data || [],
@@ -119,39 +135,53 @@ async function getAnnouncementsForUser(userId, filters = {}, page = 1, limit = 5
  * @returns {Object} { announcements, total, page, limit, totalPages }
  */
 async function getAnnouncements(filters = {}, page = 1, limit = 50) {
-  const dbClient = getDbAdmin();
-
   const from = (page - 1) * limit;
-  const to = from + limit - 1;
 
-  let query = dbClient
-    .from('announcements')
-    .select('*', { count: 'exact' });
+  const whereClauses = [];
+  const params = [];
 
   // Filter by published status
   if (filters.published !== undefined) {
-    query = query.eq('published', filters.published);
+    params.push(filters.published);
+    whereClauses.push(`published = $${params.length}`);
   }
 
   // Filter by plant_id (check if plant_id is in plant_ids array)
   if (filters.plant_id) {
-    query = query.contains('plant_ids', [parseInt(filters.plant_id, 10)]);
+    params.push([parseInt(filters.plant_id, 10)]);
+    whereClauses.push(`plant_ids @> $${params.length}`);
   }
 
   // Filter by active announcements (current date between start_date and end_date)
   if (filters.active) {
     const now = new Date().toISOString();
-    query = query
-      .or(`start_date.is.null,start_date.lte.${now}`)
-      .or(`end_date.is.null,end_date.gte.${now}`);
+    params.push(now);
+    whereClauses.push(`(start_date IS NULL OR start_date <= $${params.length})`);
+    whereClauses.push(`(end_date IS NULL OR end_date >= $${params.length})`);
   }
 
-  // Apply pagination and ordering
-  const { data, error, count } = await query
-    .order('created_at', { ascending: false })
-    .range(from, to);
+  const whereSql = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
 
-  if (error) throw new Error(`Failed to fetch announcements: ${error.message}`);
+  // Apply pagination and ordering
+  let data;
+  let count;
+  try {
+    const countResult = await executeDirectSQL(
+      `SELECT count(*)::int AS count FROM announcements ${whereSql}`,
+      params
+    );
+    count = countResult.data[0]?.count ?? 0;
+
+    const dataResult = await executeDirectSQL(
+      `SELECT * FROM announcements ${whereSql}
+       ORDER BY created_at DESC
+       LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+      [...params, limit, from]
+    );
+    data = dataResult.data;
+  } catch (error) {
+    throw new Error(`Failed to fetch announcements: ${error.message}`);
+  }
 
   return {
     announcements: data || [],
@@ -168,21 +198,18 @@ async function getAnnouncements(filters = {}, page = 1, limit = 50) {
  * @returns {Object} Announcement object
  */
 async function getAnnouncementById(id) {
-  const dbClient = getDbAdmin();
-
-  const { data, error } = await dbClient
-    .from('announcements')
-    .select('*')
-    .eq('id', id)
-    .single();
-
-  if (error) {
-    if (error.code === 'PGRST116') {
-      return null;
-    }
+  let data;
+  try {
+    const result = await executeDirectSQL(
+      'SELECT * FROM announcements WHERE id = $1 LIMIT 1',
+      [id]
+    );
+    data = result.data[0] || null;
+  } catch (error) {
     throw new Error(`Failed to fetch announcement: ${error.message}`);
   }
 
+  // 0 rows → null (mirrors .single() PGRST116 handling)
   return data;
 }
 
@@ -192,17 +219,22 @@ async function getAnnouncementById(id) {
  * @returns {Object} Created announcement
  */
 async function createAnnouncement(announcementData) {
-  const dbClient = getDbAdmin();
+  try {
+    // Dynamic column list (mirrors .insert of an arbitrary object);
+    // identifiers are double-quoted with embedded quotes escaped to stay safe.
+    const columns = Object.keys(announcementData);
+    const columnSql = columns.map(c => `"${c.replace(/"/g, '""')}"`).join(', ');
+    const placeholders = columns.map((_, i) => `$${i + 1}`).join(', ');
+    const values = columns.map(c => announcementData[c]);
 
-  const { data, error } = await dbClient
-    .from('announcements')
-    .insert([announcementData])
-    .select()
-    .single();
-
-  if (error) throw new Error(`Failed to create announcement: ${error.message}`);
-
-  return data;
+    const result = await executeDirectSQL(
+      `INSERT INTO announcements (${columnSql}) VALUES (${placeholders}) RETURNING *`,
+      values
+    );
+    return result.data[0];
+  } catch (error) {
+    throw new Error(`Failed to create announcement: ${error.message}`);
+  }
 }
 
 /**
@@ -212,22 +244,25 @@ async function createAnnouncement(announcementData) {
  * @returns {Object} Updated announcement
  */
 async function updateAnnouncement(id, announcementData) {
-  const dbClient = getDbAdmin();
+  let data;
+  try {
+    // Dynamic SET list (mirrors .update of an arbitrary object);
+    // identifiers are double-quoted with embedded quotes escaped to stay safe.
+    const columns = Object.keys(announcementData);
+    const setClauses = columns.map((c, i) => `"${c.replace(/"/g, '""')}" = $${i + 1}`);
+    const values = columns.map(c => announcementData[c]);
+    values.push(id);
 
-  const { data, error } = await dbClient
-    .from('announcements')
-    .update(announcementData)
-    .eq('id', id)
-    .select()
-    .single();
-
-  if (error) {
-    if (error.code === 'PGRST116') {
-      return null;
-    }
+    const result = await executeDirectSQL(
+      `UPDATE announcements SET ${setClauses.join(', ')} WHERE id = $${values.length} RETURNING *`,
+      values
+    );
+    data = result.data[0] || null;
+  } catch (error) {
     throw new Error(`Failed to update announcement: ${error.message}`);
   }
 
+  // 0 rows updated → null (mirrors .single() PGRST116 handling)
   return data;
 }
 
@@ -237,14 +272,14 @@ async function updateAnnouncement(id, announcementData) {
  * @returns {boolean} True if deleted successfully
  */
 async function deleteAnnouncement(id) {
-  const dbClient = getDbAdmin();
-
-  const { error } = await dbClient
-    .from('announcements')
-    .delete()
-    .eq('id', id);
-
-  if (error) throw new Error(`Failed to delete announcement: ${error.message}`);
+  try {
+    await executeDirectSQL(
+      'DELETE FROM announcements WHERE id = $1',
+      [id]
+    );
+  } catch (error) {
+    throw new Error(`Failed to delete announcement: ${error.message}`);
+  }
 
   return true;
 }

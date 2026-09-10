@@ -17,4 +17,11 @@ router.post('/verify', authenticate, qrController.verifyQr);
  */
 router.post('/encrypt', authenticate, qrController.encryptQr);
 
+/**
+ * @route   POST /api/qr/decrypt
+ * @desc    Decrypt a QR payload (D3 hex, legacy, or pipe-format). No auth required.
+ * @access  Public (gated by QR signature)
+ */
+router.post('/decrypt', qrController.decryptQr);
+
 module.exports = router;

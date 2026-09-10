@@ -1,7 +1,30 @@
 const express = require('express');
 const router = express.Router();
 const { authenticate, invalidateTzPrefCache } = require('../middleware/auth');
-const { getDbAdmin } = require('../config/database');
+const { executeDirectSQL } = require('../utils/postgresExecutor');
+
+/**
+ * @route   GET /api/user-preferences
+ * @desc    Get all user preferences
+ * @access  Private
+ */
+router.get('/', authenticate, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const result = await executeDirectSQL(
+      'SELECT preference_key, preference_value FROM user_preferences WHERE user_id = $1',
+      [userId]
+    );
+    const prefs = {};
+    for (const row of (result.data || [])) {
+      prefs[row.preference_key] = row.preference_value;
+    }
+    return res.status(200).json({ success: true, data: prefs });
+  } catch (err) {
+    console.error('[UserPreferences] GET all error:', err.message);
+    return res.status(500).json({ success: false, message: 'Failed to fetch preferences' });
+  }
+});
 
 /**
  * @route   GET /api/user-preferences/:key
@@ -17,15 +40,14 @@ router.get('/:key', authenticate, async (req, res) => {
     const userId = req.user.id;
     const { key } = req.params;
 
-    const dbClient = getDbAdmin();
-    const { data, error } = await dbClient
-      .from('user_preferences')
-      .select('preference_value')
-      .eq('user_id', userId)
-      .eq('preference_key', key)
-      .maybeSingle();
-
-    if (error) {
+    let data;
+    try {
+      const result = await executeDirectSQL(
+        'SELECT preference_value FROM user_preferences WHERE user_id = $1 AND preference_key = $2 LIMIT 1',
+        [userId, key]
+      );
+      data = result.data[0] || null;
+    } catch (error) {
       console.error('[UserPreferences] GET error:', error.message);
       return res.status(500).json({ success: false, message: 'Failed to fetch preference' });
     }
@@ -59,24 +81,21 @@ router.put('/:key', authenticate, async (req, res) => {
       return res.status(400).json({ success: false, message: 'value is required' });
     }
 
-    const dbClient = getDbAdmin();
-    const { data, error } = await dbClient
-      .from('user_preferences')
-      .upsert({
-        user_id: userId,
-        preference_key: key,
-        preference_value: value,
-        updated_at: new Date().toISOString(),
-      }, {
-        onConflict: 'user_id,preference_key',
-      })
-      .select()
-      .single();
-
-    if (error) {
-      console.error('[UserPreferences] PUT error:', error.message, 'code:', error.code, 'details:', error.details, 'hint:', error.hint);
-      console.error('[UserPreferences] PUT params:', { userId, key, value: typeof value, valueRaw: JSON.stringify(value) });
-      return res.status(500).json({ success: false, message: 'Failed to save preference', error: error.message });
+    let data;
+    try {
+      // JSON.stringify + ::jsonb handles any value type (string/number/boolean/object/array)
+      const result = await executeDirectSQL(
+        `INSERT INTO user_preferences (user_id, preference_key, preference_value, updated_at)
+         VALUES ($1, $2, $3::jsonb, $4)
+         ON CONFLICT (user_id, preference_key)
+         DO UPDATE SET preference_value = EXCLUDED.preference_value, updated_at = EXCLUDED.updated_at
+         RETURNING *`,
+        [userId, key, JSON.stringify(value), new Date().toISOString()]
+      );
+      data = result.data[0];
+    } catch (error) {
+      console.error('[UserPreferences] PUT error:', error.message);
+      return res.status(500).json({ success: false, message: 'Failed to save preference' });
     }
 
     // Immediately invalidate timezone cache so next request uses new value
@@ -89,8 +108,8 @@ router.put('/:key', authenticate, async (req, res) => {
       data: data,
     });
   } catch (err) {
-    console.error('[UserPreferences] Catch error:', err.message, err.stack);
-    return res.status(500).json({ success: false, message: 'Failed to save preference', error: err.message });
+    console.error('[UserPreferences] Error:', err.message);
+    return res.status(500).json({ success: false, message: 'Failed to save preference' });
   }
 });
 

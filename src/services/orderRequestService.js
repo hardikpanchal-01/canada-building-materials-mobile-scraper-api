@@ -1,4 +1,16 @@
-const { getDbAdmin } = require('../config/database');
+const { executeDirectSQL } = require('../utils/postgresExecutor');
+
+// Columns for order_entities reads:
+// - on_job_date is a DATE column → cast to text so consumers get "YYYY-MM-DD" strings (they call .split('-'))
+// - quantity is NUMERIC → cast to float8 so consumers get a number (node-pg returns numeric as string)
+// Appended after * so the casted values override the raw columns in the result row.
+const ORDER_ENTITY_SELECT = '*, on_job_date::text AS on_job_date, quantity::float8 AS quantity';
+
+// on_job_time is a TIME column; convertTimeToUtc may produce a UTC ISO string
+// ("2026-05-18T19:30:00.000Z") which Postgres' time parser rejects because of the 'T'
+// separator. Replacing 'T' with a space makes it parseable and stores the UTC time
+// component (same value the database stored). Plain legacy times ("14:30", "6:29 PM") pass through unchanged.
+const ON_JOB_TIME_CAST = (p) => `replace(${p}::text, 'T', ' ')::time`;
 
 // Fallback timezone when no tenant/user timezone is available
 const FALLBACK_TZ = 'America/Chicago';
@@ -205,71 +217,95 @@ function formatOrderRow(row, tz, tenantTz) {
 
 // Get order requests with pagination, filtering, and search
 async function getOrderRequests({ userId, userIds, isAdmin, userType, page = 1, limit = 15, status, search, tz, tenantTz } = {}) {
-  const dbClient = getDbAdmin();
-
   // For contractor filtering, use userIds array (handles UUID migration)
   // Falls back to [userId] if userIds not provided (backward compatibility)
   const contractorIds = userIds && userIds.length > 0 ? userIds : (userId ? [userId] : []);
 
-  // --- DB-level counts in parallel (head:true = no rows transferred) ---
-  const buildCountQuery = () => {
-    let q = dbClient.from('order_entities').select('*', { count: 'exact', head: true });
-    if (!isAdmin && userType !== 'producer' && contractorIds.length > 0) {
-      q = q.in('user_id', contractorIds);
+  // Scope by user if not admin/producer (contractor sees only their own)
+  const scopeByUser = !isAdmin && userType !== 'producer' && contractorIds.length > 0;
+
+  // --- DB-level counts in a single aggregated query (no rows transferred) ---
+  let counts;
+  try {
+    const countParams = [];
+    let countWhere = '';
+    if (scopeByUser) {
+      countParams.push(contractorIds);
+      countWhere = ' WHERE user_id = ANY($1::uuid[])';
     }
-    return q;
-  };
-
-  const [totalRes, pendingRes, submittedRes, approvedRes, rejectedRes] = await Promise.all([
-    buildCountQuery(),
-    buildCountQuery().eq('status', 'pending'),
-    buildCountQuery().eq('status', 'submitted'),
-    buildCountQuery().eq('status', 'approved'),
-    buildCountQuery().in('status', ['rejected', 'canceled']),
-  ]);
-
-  const countError = totalRes.error || pendingRes.error || submittedRes.error || approvedRes.error || rejectedRes.error;
-  if (countError) throw new Error(`Failed to fetch counts: ${countError.message}`);
-
-  const counts = {
-    total: totalRes.count || 0,
-    pending: pendingRes.count || 0,
-    submitted: submittedRes.count || 0,
-    approved: approvedRes.count || 0,
-    rejected: rejectedRes.count || 0,
-  };
+    const countResult = await executeDirectSQL(
+      `SELECT
+         count(*)::int AS total,
+         (count(*) FILTER (WHERE status = 'pending'))::int AS pending,
+         (count(*) FILTER (WHERE status = 'submitted'))::int AS submitted,
+         (count(*) FILTER (WHERE status = 'approved'))::int AS approved,
+         (count(*) FILTER (WHERE status IN ('rejected', 'canceled')))::int AS rejected
+       FROM order_entities${countWhere}`,
+      countParams
+    );
+    const c = countResult.data[0] || {};
+    counts = {
+      total: c.total || 0,
+      pending: c.pending || 0,
+      submitted: c.submitted || 0,
+      approved: c.approved || 0,
+      rejected: c.rejected || 0,
+    };
+  } catch (countError) {
+    throw new Error(`Failed to fetch counts: ${countError.message}`);
+  }
 
   // --- Build paginated data query ---
-  let query = dbClient.from('order_entities').select('*', { count: 'exact' });
+  const conds = [];
+  const params = [];
 
-  // Scope by user if not admin/producer (contractor sees only their own)
-  if (!isAdmin && userType !== 'producer' && contractorIds.length > 0) {
-    query = query.in('user_id', contractorIds);
+  if (scopeByUser) {
+    params.push(contractorIds);
+    conds.push(`user_id = ANY($${params.length}::uuid[])`);
   }
 
   // Status filter
   if (status && status !== 'all') {
     if (status === 'rejected') {
-      query = query.in('status', ['rejected', 'canceled']);
+      conds.push(`status IN ('rejected', 'canceled')`);
     } else {
-      query = query.eq('status', status);
+      params.push(status);
+      conds.push(`status = $${params.length}`);
     }
   }
 
   // Search filter
   if (search && search.trim()) {
-    const q = search.trim();
-    query = query.or(
-      `job_name.ilike.%${q}%,company_name.ilike.%${q}%,job_address.ilike.%${q}%,job_city.ilike.%${q}%,concrete_product_name.ilike.%${q}%,po_number.ilike.%${q}%`
+    params.push(`%${search.trim()}%`);
+    const p = `$${params.length}`;
+    conds.push(
+      `(job_name ILIKE ${p} OR company_name ILIKE ${p} OR job_address ILIKE ${p} OR job_city ILIKE ${p} OR concrete_product_name ILIKE ${p} OR po_number ILIKE ${p})`
     );
   }
 
+  const where = conds.length > 0 ? ` WHERE ${conds.join(' AND ')}` : '';
+
   // Ordering and pagination
   const offset = (page - 1) * limit;
-  query = query.order('created_at', { ascending: false }).range(offset, offset + limit - 1);
 
-  const { data, count, error } = await query;
-  if (error) throw new Error(`Failed to fetch order requests: ${error.message}`);
+  let data, count;
+  try {
+    const dataParams = params.concat([limit, offset]);
+    const [dataResult, filteredCountResult] = await Promise.all([
+      executeDirectSQL(
+        `SELECT ${ORDER_ENTITY_SELECT} FROM order_entities${where} ORDER BY created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+        dataParams
+      ),
+      executeDirectSQL(
+        `SELECT count(*)::int AS count FROM order_entities${where}`,
+        params
+      ),
+    ]);
+    data = dataResult.data;
+    count = (filteredCountResult.data[0] || {}).count;
+  } catch (error) {
+    throw new Error(`Failed to fetch order requests: ${error.message}`);
+  }
 
   const total = count || 0;
   const totalPages = Math.ceil(total / limit);
@@ -289,87 +325,97 @@ async function getOrderRequests({ userId, userIds, isAdmin, userType, page = 1, 
 
 // Get single order request by ID
 async function getOrderRequestById(id, tz = null, tenantTz = null) {
-  const dbClient = getDbAdmin();
-  const { data, error } = await dbClient
-    .from('order_entities')
-    .select('*')
-    .eq('id', id)
-    .single();
+  let data;
+  try {
+    const result = await executeDirectSQL(
+      `SELECT ${ORDER_ENTITY_SELECT} FROM order_entities WHERE id = $1 LIMIT 1`,
+      [id]
+    );
+    data = result.data?.[0] || null;
+  } catch (error) {
+    throw new Error(`Order request not found: ${error.message}`);
+  }
 
-  if (error) throw new Error(`Order request not found: ${error.message}`);
+  // .single() errored when no row matched — keep throwing in that case
+  if (!data) throw new Error('Order request not found: no rows returned');
   return tz ? formatOrderRow(data, tz, tenantTz) : data;
 }
 
 // Create order request
 async function createOrderRequest(input, tenantTz = null) {
-  const dbClient = getDbAdmin();
-  const { data, error } = await dbClient
-    .from('order_entities')
-    .insert({
-      user_id: input.user_id,
-      order_type: input.order_type || 'without_project',
-      project_code: input.project_code || null,
-      project_name: input.project_name || null,
-      company_id: input.company_id,
-      company_name: input.company_name || null,
-      referenced_order: input.referenced_order || null,
-      region_code: input.region_code || null,
-      region_name: input.region_name || null,
-      customer_job_number: input.customer_job_number || null,
-      usage_code: input.usage_code || null,
-      usage_name: input.usage_name || null,
-      pour_method_code: input.pour_method_code || null,
-      pour_method_name: input.pour_method_name || null,
-      po_number: input.po_number || null,
-      order_status: input.order_status ?? 0,
-      on_job_date: input.on_job_date,
-      on_job_time: convertTimeToUtc(input.on_job_date, input.on_job_time, tenantTz),
-      job_name: input.job_name || null,
-      plant_code: input.plant_code || null,
-      plant_name: input.plant_name || null,
-      job_address: input.job_address,
-      job_city: input.job_city,
-      job_state: input.job_state || null,
-      job_zip_code: input.job_zip_code || null,
-      job_contact_name: input.job_contact_name,
-      job_contact_phone: input.job_contact_phone,
-      driver_instructions: input.driver_instructions || null,
-      know_mix_code: input.know_mix_code ?? false,
-      concrete_product_code: input.concrete_product_code || null,
-      concrete_product_name: input.concrete_product_name || null,
-      concrete_product_text: input.concrete_product_text || null,
-      psi: input.psi || null,
-      rock_size: input.rock_size || null,
-      air_non_air: input.air_non_air || null,
-      fly_ash: input.fly_ash || null,
-      quantity: input.quantity || null,
-      truck_spacing: input.truck_spacing || null,
-      spacing_type: input.spacing_type || 'minutes',
-      slump: input.slump || null,
-      concrete_notes: input.concrete_notes || null,
-      call_back_load: input.call_back_load || null,
-      pumped: input.pumped ?? false,
-      pump_type: input.pumped ? (input.pump_type || null) : null,
-      admixture_product_code: input.admixture_product_code || null,
-      admixture_product_name: input.admixture_product_name || null,
-      admixture_notes: input.admixture_notes || null,
-      other_product_code: input.other_product_code || null,
-      other_product_name: input.other_product_name || null,
-      other_notes: input.other_notes || null,
-    })
-    .select('id')
-    .single();
+  const row = {
+    user_id: input.user_id,
+    order_type: input.order_type || 'without_project',
+    project_code: input.project_code || null,
+    project_name: input.project_name || null,
+    company_id: input.company_id,
+    company_name: input.company_name || null,
+    referenced_order: input.referenced_order || null,
+    region_code: input.region_code || null,
+    region_name: input.region_name || null,
+    customer_job_number: input.customer_job_number || null,
+    usage_code: input.usage_code || null,
+    usage_name: input.usage_name || null,
+    pour_method_code: input.pour_method_code || null,
+    pour_method_name: input.pour_method_name || null,
+    po_number: input.po_number || null,
+    order_status: input.order_status ?? 0,
+    on_job_date: input.on_job_date,
+    on_job_time: convertTimeToUtc(input.on_job_date, input.on_job_time, tenantTz),
+    job_name: input.job_name || null,
+    plant_code: input.plant_code || null,
+    plant_name: input.plant_name || null,
+    job_address: input.job_address,
+    job_city: input.job_city,
+    job_state: input.job_state || null,
+    job_zip_code: input.job_zip_code || null,
+    job_contact_name: input.job_contact_name,
+    job_contact_phone: input.job_contact_phone,
+    driver_instructions: input.driver_instructions || null,
+    know_mix_code: input.know_mix_code ?? false,
+    concrete_product_code: input.concrete_product_code || null,
+    concrete_product_name: input.concrete_product_name || null,
+    concrete_product_text: input.concrete_product_text || null,
+    psi: input.psi || null,
+    rock_size: input.rock_size || null,
+    air_non_air: input.air_non_air || null,
+    fly_ash: input.fly_ash || null,
+    quantity: input.quantity || null,
+    truck_spacing: input.truck_spacing || null,
+    spacing_type: input.spacing_type || 'minutes',
+    slump: input.slump || null,
+    concrete_notes: input.concrete_notes || null,
+    call_back_load: input.call_back_load || null,
+    pumped: input.pumped ?? false,
+    pump_type: input.pumped ? (input.pump_type || null) : null,
+    admixture_product_code: input.admixture_product_code || null,
+    admixture_product_name: input.admixture_product_name || null,
+    admixture_notes: input.admixture_notes || null,
+    other_product_code: input.other_product_code || null,
+    other_product_name: input.other_product_name || null,
+    other_notes: input.other_notes || null,
+  };
 
-  if (error) throw new Error(`Failed to create order request: ${error.message}`);
-  return data;
+  const columns = Object.keys(row);
+  const params = Object.values(row);
+  const placeholders = columns.map((col, i) =>
+    col === 'on_job_time' ? ON_JOB_TIME_CAST(`$${i + 1}`) : `$${i + 1}`
+  );
+
+  try {
+    const result = await executeDirectSQL(
+      `INSERT INTO order_entities (${columns.join(', ')}) VALUES (${placeholders.join(', ')}) RETURNING id`,
+      params
+    );
+    return result.data[0];
+  } catch (error) {
+    throw new Error(`Failed to create order request: ${error.message}`);
+  }
 }
 
 // Update order request
 async function updateOrderRequest(id, input, tenantTz = null) {
-  const dbClient = getDbAdmin();
-  const { error } = await dbClient
-    .from('order_entities')
-    .update({
+  const row = {
       order_type: input.order_type || 'without_project',
       project_code: input.project_code || null,
       project_name: input.project_name || null,
@@ -420,10 +466,23 @@ async function updateOrderRequest(id, input, tenantTz = null) {
       other_product_name: input.other_product_name || null,
       other_notes: input.other_notes || null,
       updated_at: new Date().toISOString(),
-    })
-    .eq('id', id);
+  };
 
-  if (error) throw new Error(`Failed to update order request: ${error.message}`);
+  const columns = Object.keys(row);
+  const params = Object.values(row);
+  const setClauses = columns.map((col, i) =>
+    col === 'on_job_time' ? `${col} = ${ON_JOB_TIME_CAST(`$${i + 1}`)}` : `${col} = $${i + 1}`
+  );
+  params.push(id);
+
+  try {
+    await executeDirectSQL(
+      `UPDATE order_entities SET ${setClauses.join(', ')} WHERE id = $${params.length}`,
+      params
+    );
+  } catch (error) {
+    throw new Error(`Failed to update order request: ${error.message}`);
+  }
   return { id };
 }
 
@@ -434,19 +493,19 @@ async function updateOrderRequestStatus(id, status) {
     throw new Error('Invalid status');
   }
 
-  const dbClient = getDbAdmin();
-  const { error } = await dbClient
-    .from('order_entities')
-    .update({ status, updated_at: new Date().toISOString() })
-    .eq('id', id);
-
-  if (error) throw new Error(`Failed to update status: ${error.message}`);
+  try {
+    await executeDirectSQL(
+      `UPDATE order_entities SET status = $1, updated_at = $2 WHERE id = $3`,
+      [status, new Date().toISOString(), id]
+    );
+  } catch (error) {
+    throw new Error(`Failed to update status: ${error.message}`);
+  }
   return { id, status };
 }
 
 // Update verification fields
 async function updateOrderVerification(id, data, tenantTz = null) {
-  const dbClient = getDbAdmin();
   const updatePayload = { updated_at: new Date().toISOString() };
 
   if (data.order_number !== undefined) updatePayload.order_number = data.order_number || null;
@@ -457,25 +516,36 @@ async function updateOrderVerification(id, data, tenantTz = null) {
     updatePayload.on_job_time = convertTimeToUtc(dateForConversion, data.on_job_time, tenantTz);
   }
 
-  const { error } = await dbClient
-    .from('order_entities')
-    .update(updatePayload)
-    .eq('id', id);
+  const columns = Object.keys(updatePayload);
+  const params = Object.values(updatePayload);
+  const setClauses = columns.map((col, i) =>
+    col === 'on_job_time' ? `${col} = ${ON_JOB_TIME_CAST(`$${i + 1}`)}` : `${col} = $${i + 1}`
+  );
+  params.push(id);
 
-  if (error) throw new Error(`Failed to update verification: ${error.message}`);
+  try {
+    await executeDirectSQL(
+      `UPDATE order_entities SET ${setClauses.join(', ')} WHERE id = $${params.length}`,
+      params
+    );
+  } catch (error) {
+    throw new Error(`Failed to update verification: ${error.message}`);
+  }
   return { id };
 }
 
 // Get messages for an order request
 async function getMessages(orderEntityId, tz = null) {
-  const dbClient = getDbAdmin();
-  const { data, error } = await dbClient
-    .from('order_entity_messages')
-    .select('*')
-    .eq('order_entity_id', orderEntityId)
-    .order('created_at', { ascending: true });
-
-  if (error) throw new Error(`Failed to fetch messages: ${error.message}`);
+  let data;
+  try {
+    const result = await executeDirectSQL(
+      `SELECT * FROM order_entity_messages WHERE order_entity_id = $1 ORDER BY created_at ASC`,
+      [orderEntityId]
+    );
+    data = result.data;
+  } catch (error) {
+    throw new Error(`Failed to fetch messages: ${error.message}`);
+  }
   const messages = data || [];
   if (tz) {
     return messages.map(msg => ({
@@ -488,30 +558,31 @@ async function getMessages(orderEntityId, tz = null) {
 
 // Send a message
 async function sendMessage(orderEntityId, senderId, messageText, senderRole, tz = null) {
-  const dbClient = getDbAdmin();
-
-  // Fetch sender name server-side
-  const { data: userProfile } = await dbClient
-    .from('users')
-    .select('full_name, email')
-    .eq('id', senderId)
-    .single();
+  // Fetch sender name server-side (lookup errors are ignored, same as before)
+  let userProfile = null;
+  try {
+    const userResult = await executeDirectSQL(
+      `SELECT full_name, email FROM users WHERE id = $1 LIMIT 1`,
+      [senderId]
+    );
+    userProfile = userResult.data?.[0] || null;
+  } catch {
+    userProfile = null;
+  }
 
   const senderName = userProfile?.full_name || userProfile?.email || 'Unknown User';
 
-  const { data, error } = await dbClient
-    .from('order_entity_messages')
-    .insert({
-      order_entity_id: orderEntityId,
-      sender_id: senderId,
-      sender_name: senderName,
-      sender_role: senderRole,
-      message_text: messageText.trim(),
-    })
-    .select()
-    .single();
-
-  if (error) throw new Error(`Failed to send message: ${error.message}`);
+  let data;
+  try {
+    const result = await executeDirectSQL(
+      `INSERT INTO order_entity_messages (order_entity_id, sender_id, sender_name, sender_role, message_text)
+       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+      [orderEntityId, senderId, senderName, senderRole, messageText.trim()]
+    );
+    data = result.data[0];
+  } catch (error) {
+    throw new Error(`Failed to send message: ${error.message}`);
+  }
   if (tz) {
     return { ...data, created_at: formatDateTimeTo12h(data.created_at, tz) };
   }
@@ -524,18 +595,23 @@ let formDataCacheTime = 0;
 const FORM_DATA_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
 // Batch-fetch helper for large tables
-async function fetchAllBatched(dbClient, table, selectFields, filters, orderField, batchSize = 1000) {
+// whereClause is a plain SQL condition (no user input — internal callers only)
+async function fetchAllBatched(table, selectFields, whereClause, orderField, batchSize = 1000) {
   let all = [];
   let offset = 0;
   let hasMore = true;
 
   while (hasMore) {
-    let query = dbClient.from(table).select(selectFields);
-    if (filters) query = filters(query);
-    query = query.order(orderField, { ascending: true }).range(offset, offset + batchSize - 1);
-
-    const { data, error } = await query;
-    if (error) throw new Error(`Failed to fetch ${table}: ${error.message}`);
+    let data;
+    try {
+      const result = await executeDirectSQL(
+        `SELECT ${selectFields} FROM ${table}${whereClause ? ` WHERE ${whereClause}` : ''} ORDER BY ${orderField} ASC LIMIT $1 OFFSET $2`,
+        [batchSize, offset]
+      );
+      data = result.data;
+    } catch (error) {
+      throw new Error(`Failed to fetch ${table}: ${error.message}`);
+    }
     if (data && data.length > 0) {
       all = all.concat(data);
       offset += batchSize;
@@ -554,47 +630,43 @@ async function getFormData() {
     return formDataCache;
   }
 
-  const dbClient = getDbAdmin();
-
   // Run ALL 5 fetches in parallel
   const [regions, customers, projects, admixtureRaw, otherRaw] = await Promise.all([
     // 1. Regions (small table - single query)
-    dbClient
-      .from('regions')
-      .select('code, description')
-      .order('description', { ascending: true })
-      .then(({ data, error }) => {
-        if (error) throw new Error(`Failed to fetch regions: ${error.message}`);
-        return data || [];
+    executeDirectSQL(`SELECT code, description FROM regions ORDER BY description ASC`)
+      .then((result) => result.data || [])
+      .catch((error) => {
+        throw new Error(`Failed to fetch regions: ${error.message}`);
       }),
 
     // 2. Customers (large table - batched)
-    fetchAllBatched(dbClient, 'customers', 'code, name',
-      (q) => q.or('inactive.is.null,inactive.eq.false'), 'name'),
+    fetchAllBatched('customers', 'code, name',
+      '(inactive IS NULL OR inactive = false)', 'name'),
 
     // 3. Projects (large table - batched)
-    fetchAllBatched(dbClient, 'projects',
+    fetchAllBatched('projects',
       'id, code, name, customer_code, customer_name, delivery_addr1, delivery_addr2, delivery_addr3, contact, phone',
       null, 'name'),
 
-    // 4. Admixture products (matches web query exactly - no .order() before limit)
-    dbClient
-      .from('order_products')
-      .select('item_code, description')
-      .eq('is_mix', false)
-      .not('item_code', 'is', null)
-      .or('description.ilike.%admix%,description.ilike.%retard%,description.ilike.%mrwra%,description.ilike.%calcium%,description.ilike.%accelerat%')
-      .limit(2000)
-      .then(({ data }) => data || []),
+    // 4. Admixture products (matches web query exactly - no ORDER BY before limit)
+    executeDirectSQL(
+      `SELECT item_code, description FROM order_products
+       WHERE is_mix = false AND item_code IS NOT NULL
+         AND (description ILIKE ANY($1::text[]))
+       LIMIT 2000`,
+      [['%admix%', '%retard%', '%mrwra%', '%calcium%', '%accelerat%']]
+    )
+      .then((result) => result.data || [])
+      .catch(() => []),
 
-    // 5. Other products (matches web query exactly - no .order() before limit)
-    dbClient
-      .from('order_products')
-      .select('item_code, description')
-      .eq('is_mix', false)
-      .not('item_code', 'is', null)
-      .limit(2000)
-      .then(({ data }) => data || []),
+    // 5. Other products (matches web query exactly - no ORDER BY before limit)
+    executeDirectSQL(
+      `SELECT item_code, description FROM order_products
+       WHERE is_mix = false AND item_code IS NOT NULL
+       LIMIT 2000`
+    )
+      .then((result) => result.data || [])
+      .catch(() => []),
   ]);
 
   // Deduplicate admixture products by item_code
@@ -639,16 +711,20 @@ async function getOrdersByProjectCode(projectCode) {
     return [];
   }
 
-  const dbClient = getDbAdmin();
-
-  const { data, error } = await dbClient
-    .from('orders')
-    .select('order_id, order_code, customer_code, customer_name, order_date, project_name, delivery_addr1, delivery_addr2, delivery_addr3, ordered_by_name, ordered_by_phone, pricing_plant_code, zone_name')
-    .eq('project_code', projectCode.trim())
-    .order('order_date', { ascending: false })
-    .limit(50);
-
-  if (error) throw new Error(`Failed to fetch orders by project code: ${error.message}`);
+  let data;
+  try {
+    const result = await executeDirectSQL(
+      `SELECT order_id, order_code, customer_code, customer_name, order_date, project_name, delivery_addr1, delivery_addr2, delivery_addr3, ordered_by_name, ordered_by_phone, pricing_plant_code, zone_name
+       FROM orders
+       WHERE project_code = $1
+       ORDER BY order_date DESC
+       LIMIT 50`,
+      [projectCode.trim()]
+    );
+    data = result.data;
+  } catch (error) {
+    throw new Error(`Failed to fetch orders by project code: ${error.message}`);
+  }
 
   return data || [];
 }
@@ -659,17 +735,22 @@ async function searchOrders(searchTerm) {
     return [];
   }
 
-  const dbClient = getDbAdmin();
   const term = searchTerm.trim();
 
   // Use prefix match for order_code (index-friendly) and contains for customer_name
-  const { data, error } = await dbClient
-    .from('orders')
-    .select('order_id, order_code, customer_code, customer_name, order_date, project_name, delivery_addr1, delivery_addr2, delivery_addr3, ordered_by_name, ordered_by_phone, pricing_plant_code, zone_name')
-    .or(`order_code.ilike.${term}%,customer_name.ilike.%${term}%`)
-    .limit(50);
-
-  if (error) throw new Error(`Failed to search orders: ${error.message}`);
+  let data;
+  try {
+    const result = await executeDirectSQL(
+      `SELECT order_id, order_code, customer_code, customer_name, order_date, project_name, delivery_addr1, delivery_addr2, delivery_addr3, ordered_by_name, ordered_by_phone, pricing_plant_code, zone_name
+       FROM orders
+       WHERE (order_code ILIKE $1 OR customer_name ILIKE $2)
+       LIMIT 50`,
+      [`${term}%`, `%${term}%`]
+    );
+    data = result.data;
+  } catch (error) {
+    throw new Error(`Failed to search orders: ${error.message}`);
+  }
 
   // Deduplicate by order_code
   const seen = new Map();
@@ -684,34 +765,40 @@ async function searchOrders(searchTerm) {
 
 // Search mix products
 async function searchProducts(search = '', uniqueOffset = 0, limit = 50) {
-  const dbClient = getDbAdmin();
   const BATCH_SIZE = 1000;
   const needed = uniqueOffset + limit + 1;
   const seen = new Map();
   let dbOffset = 0;
   let exhausted = false;
 
-  while (seen.size < needed && !exhausted) {
-    let query = dbClient
-      .from('order_products')
-      .select('item_code, description, slump')
-      .eq('is_mix', true)
-      .not('item_code', 'is', null);
-
-    if (search.trim()) {
-      const words = search.trim().split(/\s+/)
-        .map((w) => w.replace(/^[^a-zA-Z0-9]+$/, ''))
-        .filter((w) => w.length > 0);
-      for (const w of words) {
-        query = query.or(`item_code.ilike.%${w}%,description.ilike.%${w}%`);
-      }
+  // Build filter conditions once (each search word must match item_code OR description)
+  const conds = ['is_mix = true', 'item_code IS NOT NULL'];
+  const filterParams = [];
+  if (search.trim()) {
+    const words = search.trim().split(/\s+/)
+      .map((w) => w.replace(/^[^a-zA-Z0-9]+$/, ''))
+      .filter((w) => w.length > 0);
+    for (const w of words) {
+      filterParams.push(`%${w}%`);
+      const p = `$${filterParams.length}`;
+      conds.push(`(item_code ILIKE ${p} OR description ILIKE ${p})`);
     }
+  }
 
-    const { data, error } = await query
-      .order('item_code')
-      .range(dbOffset, dbOffset + BATCH_SIZE - 1);
-
-    if (error) break;
+  while (seen.size < needed && !exhausted) {
+    let data;
+    try {
+      const result = await executeDirectSQL(
+        `SELECT item_code, description, slump FROM order_products
+         WHERE ${conds.join(' AND ')}
+         ORDER BY item_code
+         LIMIT $${filterParams.length + 1} OFFSET $${filterParams.length + 2}`,
+        filterParams.concat([BATCH_SIZE, dbOffset])
+      );
+      data = result.data;
+    } catch (error) {
+      break;
+    }
     if (!data || data.length === 0) { exhausted = true; break; }
 
     for (const row of data) {
@@ -739,15 +826,20 @@ async function searchProducts(search = '', uniqueOffset = 0, limit = 50) {
 async function getRecentOrderEntities(userId) {
   if (!userId) return [];
 
-  const dbClient = getDbAdmin();
-  const { data, error } = await dbClient
-    .from('order_entities')
-    .select('id, job_name, on_job_date, company_name, company_id')
-    .eq('user_id', userId)
-    .order('created_at', { ascending: false })
-    .limit(20);
-
-  if (error) throw new Error(`Failed to fetch recent order entities: ${error.message}`);
+  let data;
+  try {
+    const result = await executeDirectSQL(
+      `SELECT id, job_name, on_job_date::text AS on_job_date, company_name, company_id
+       FROM order_entities
+       WHERE user_id = $1
+       ORDER BY created_at DESC
+       LIMIT 20`,
+      [userId]
+    );
+    data = result.data;
+  } catch (error) {
+    throw new Error(`Failed to fetch recent order entities: ${error.message}`);
+  }
 
   return (data || []).map((o) => ({
     id: o.id,

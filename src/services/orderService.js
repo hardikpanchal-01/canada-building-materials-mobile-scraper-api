@@ -14,7 +14,6 @@
 
 const { executeDirectSQL } = require('../utils/postgresExecutor');
 const { fetchExclusionPatterns } = require('./exclusionPatternService');
-const { getDbAdmin } = require('../config/database');
 
 /**
  * Get timezone abbreviation (CST/CDT/EST/etc.) from IANA timezone name.
@@ -129,14 +128,13 @@ async function fetchProgressBarColors() {
     return _progressBarColorsCache;
   }
   try {
-    const dbClient = getDbAdmin();
-    const { data, error } = await dbClient
-      .from('system_config')
-      .select('config_value')
-      .eq('config_key', 'progress_bar_colors')
-      .single();
+    const result = await executeDirectSQL(
+      'SELECT config_value FROM system_config WHERE config_key = $1 LIMIT 1',
+      ['progress_bar_colors']
+    );
+    const data = result.data?.[0];
 
-    if (error || !data) return {};
+    if (!data) return {};
 
     const parsed = typeof data.config_value === 'string'
       ? JSON.parse(data.config_value)
@@ -165,14 +163,13 @@ async function fetchTrackingStatusColors() {
     return _trackingStatusColorsCache;
   }
   try {
-    const dbClient = getDbAdmin();
-    const { data, error } = await dbClient
-      .from('system_config')
-      .select('config_value')
-      .eq('config_key', 'progress_bar_colors')
-      .single();
+    const result = await executeDirectSQL(
+      'SELECT config_value FROM system_config WHERE config_key = $1 LIMIT 1',
+      ['progress_bar_colors']
+    );
+    const data = result.data?.[0];
 
-    if (error || !data) return {};
+    if (!data) return {};
 
     const parsed = typeof data.config_value === 'string'
       ? JSON.parse(data.config_value)

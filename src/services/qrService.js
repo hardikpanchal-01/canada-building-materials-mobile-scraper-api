@@ -10,26 +10,58 @@
 const crypto = require('crypto');
 const ticketService = require('./ticketService');
 const truckService = require('./truckService');
-const { getDbAdmin } = require('../config/database');
-const { getAuthDbAdmin } = require('../config/authDatabase');
+const { executeDirectSQL } = require('../utils/postgresExecutor');
+const { executeAuthSQL } = require('../config/authPostgres');
+
+/**
+ * Resolve req.user id (UUID or numeric) -> tenant row via auth_tenant tables in
+ * PostgreSQL. Returns the tenant row (selected columns) or null.
+ */
+async function fetchTenantForUserSQL(userAccessId, tenantColumns) {
+  let numericUserId = null;
+  if (typeof userAccessId === 'number' || /^\d+$/.test(userAccessId)) {
+    numericUserId = Number(userAccessId);
+  } else {
+    const uResult = await executeAuthSQL(
+      'SELECT id FROM users WHERE uuid = $1 AND deleted_at IS NULL LIMIT 1',
+      [userAccessId]
+    );
+    if (uResult.data.length === 0) return null;
+    numericUserId = uResult.data[0].id;
+  }
+
+  const tResult = await executeAuthSQL(
+    `SELECT ${tenantColumns.map(c => `t.${c}`).join(', ')}
+     FROM tenant_users tu
+     JOIN tenants t ON t.id = tu.tenant_id AND t.deleted_at IS NULL
+     WHERE tu.user_id = $1 AND tu.status = 'active'
+     LIMIT 1`,
+    [numericUserId]
+  );
+  return tResult.data.length > 0 ? tResult.data[0] : null;
+}
+
+// ── D3 format constants ──
+const D3_VERSION = Buffer.from([0x01, 0x00, 0x00, 0x00]);
+const D3_MAGIC   = Buffer.from([0x0d, 0xf0, 0xad, 0xba]);
+const D3_HEX_RE  = /^\[TK\/E\](01000000[0-9A-Fa-f]+)$/;
 
 /**
  * Fetch all ticket_products for a given ticket_code and attach to ticket object.
  */
 async function enrichTicketProducts(ticket, ticketCode) {
   try {
-    const dbClient = getDbAdmin();
-    const { data: tRow } = await dbClient
-      .from('tickets')
-      .select('ticket_id, order_id, verifi_json')
-      .eq('ticket_code', ticketCode)
-      .limit(1)
-      .maybeSingle();
+    const tRes = await executeDirectSQL(
+      'SELECT ticket_id, order_id, verifi_json FROM tickets WHERE ticket_code = $1 LIMIT 1',
+      [ticketCode]
+    );
+    const tRow = tRes.data?.[0] || null;
     if (tRow?.ticket_id) {
-      const { data: products } = await dbClient
-        .from('ticket_products')
-        .select('id, ticket_id, item_code, description, short_description, is_mix, is_assoc, load_qty, delv_qty, delv_qty_unit, order_qty, order_qty_unit, ticket_qty, ticket_qty_unit, acc_delv_qty, slump')
-        .eq('ticket_id', tRow.ticket_id);
+      const pRes = await executeDirectSQL(
+        'SELECT id, ticket_id, item_code, description, short_description, is_mix, is_assoc, load_qty, delv_qty, delv_qty_unit, order_qty, order_qty_unit, ticket_qty, ticket_qty_unit, acc_delv_qty, slump FROM ticket_products WHERE ticket_id = $1',
+        [tRow.ticket_id]
+      );
+      const products = pRes.data;
       ticket.ticket_products = products || [];
 
       // Set slump matching web priority: verifi_json → order_products → ticket_products
@@ -42,13 +74,11 @@ async function enrichTicketProducts(ticket, ticketCode) {
         }
       }
       if (ticket.slump == null && tRow.order_id) {
-        const { data: opRow } = await dbClient
-          .from('order_products')
-          .select('slump')
-          .eq('order_id', tRow.order_id)
-          .not('slump', 'is', null)
-          .limit(1)
-          .maybeSingle();
+        const opRes = await executeDirectSQL(
+          'SELECT slump FROM order_products WHERE order_id = $1 AND slump IS NOT NULL LIMIT 1',
+          [tRow.order_id]
+        );
+        const opRow = opRes.data?.[0] || null;
         if (opRow?.slump) ticket.slump = opRow.slump;
       }
       if (ticket.slump == null && products?.length > 0) {
@@ -156,6 +186,90 @@ function decryptQrPayload(payload) {
 }
 
 /**
+ * Derive a 24-byte TripleDES key from the D3 passphrase.
+ * key16 = SHA1( passphrase as UTF-16LE )[0..16]
+ * key24 = key16 + key16[0..8]   (two-key 3DES: K1 K2 K1)
+ */
+function tripleDesKey(passphrase) {
+  const utf16le = Buffer.from(passphrase, 'utf16le');
+  const sha1 = crypto.createHash('sha1').update(utf16le).digest();
+  const k16 = sha1.subarray(0, 16);
+  return Buffer.concat([k16, k16.subarray(0, 8)]);
+}
+
+/**
+ * Decrypt a D3-format QR text: [TK/E]01000000<hex>
+ * Returns the decrypted URL string, or null if decryption fails.
+ */
+function decryptD3QrText(text) {
+  const passphrase = process.env.D3_QR_PASSPHRASE;
+  if (!passphrase) {
+    console.error('[QR] D3_QR_PASSPHRASE not configured');
+    return null;
+  }
+
+  const m = D3_HEX_RE.exec(text);
+  if (!m || m[1].length % 2 !== 0) return null;
+
+  const blob = Buffer.from(m[1], 'hex');
+  if (blob.length < 20 || !blob.subarray(0, 4).equals(D3_VERSION)) return null;
+
+  const iv = blob.subarray(4, 12);
+  const ct = blob.subarray(12);
+  if (ct.length % 8 !== 0) return null;
+
+  let plain;
+  try {
+    const d = crypto.createDecipheriv('des-ede3-cbc', tripleDesKey(passphrase), iv);
+    plain = Buffer.concat([d.update(ct), d.final()]);
+  } catch {
+    return null;
+  }
+
+  if (plain.length < 8 || !plain.subarray(0, 4).equals(D3_MAGIC)) return null;
+
+  const authLen = plain.readUInt16LE(4);
+  const len = plain.readUInt16LE(6);
+  if (authLen !== 0 || 8 + len > plain.length) return null;
+
+  const payload = plain.subarray(8, 8 + len);
+  return payload.length % 2 === 0 ? payload.toString('utf16le') : payload.toString('latin1');
+}
+
+/**
+ * Check if a raw QR string is in D3 hex format.
+ */
+function isD3Format(payload) {
+  return D3_HEX_RE.test(payload);
+}
+
+/**
+ * Extract ticket code from a Truckast tracking URL.
+ * e.g. https://cbm.truckast.ai/t/36194717?sig=... → "36194717"
+ */
+function extractTicketCodeFromUrl(url) {
+  try {
+    const parsed = new URL(url);
+    const match = /^\/t\/([^/?]+)/.exec(parsed.pathname);
+    return match ? match[1] : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Parse a [TK/URI] prefix QR (D3 plain-link variant).
+ * Returns the URL after the prefix.
+ */
+function parseTkUri(payload) {
+  const prefix = '[TK/URI]';
+  if (payload.startsWith(prefix)) {
+    return payload.slice(prefix.length).trim();
+  }
+  return null;
+}
+
+/**
  * Parse a pipe-separated QR fallback string.
  *
  * Supported formats:
@@ -202,48 +316,8 @@ async function getTenantQrSettings(userAccess) {
   if (!userAccess?.id) return null;
 
   try {
-    const dbClient = getAuthDbAdmin();
-
-    // Step 1: Resolve UUID → integer user id in auth_tenant.users
-    let numericUserId = null;
-    if (typeof userAccess.id === 'number' || /^\d+$/.test(userAccess.id)) {
-      numericUserId = Number(userAccess.id);
-    } else {
-      const { data: uData } = await dbClient
-        .schema('auth_tenant')
-        .from('users')
-        .select('id')
-        .eq('uuid', userAccess.id)
-        .is('deleted_at', null)
-        .limit(1);
-
-      if (!uData || uData.length === 0) return null;
-      numericUserId = uData[0].id;
-    }
-
-    // Step 2: Get tenant_id from tenant_users
-    const { data: tuData } = await dbClient
-      .schema('auth_tenant')
-      .from('tenant_users')
-      .select('tenant_id')
-      .eq('user_id', numericUserId)
-      .eq('status', 'active')
-      .limit(1);
-
-    if (!tuData || tuData.length === 0) return null;
-
-    // Step 3: Get QR-related tenant columns
-    const { data: tData, error: tError } = await dbClient
-      .schema('auth_tenant')
-      .from('tenants')
-      .select('qr_enabled, qr_mode, security_mode')
-      .eq('id', tuData[0].tenant_id)
-      .is('deleted_at', null)
-      .limit(1);
-
-    if (tError || !tData || tData.length === 0) return null;
-
-    const t = tData[0];
+    const t = await fetchTenantForUserSQL(userAccess.id, ['qr_enabled', 'qr_mode', 'security_mode']);
+    if (!t) return null;
     return {
       qr_enabled: t.qr_enabled ?? false,
       qr_mode: t.qr_mode || null,
@@ -266,8 +340,52 @@ async function getTenantQrSettings(userAccess) {
 async function verifyQrPayload(payload, userAccess) {
   // Step 1: Decrypt or parse the QR data
   let qrData;
+  let d3Meta = null; // populated when D3/URI format resolves to a URL
 
-  if (payload.startsWith(TK_PREFIX)) {
+  // Rule 3: [TK/URI] plain-link prefix
+  const tkUri = parseTkUri(payload);
+  if (tkUri) {
+    const ticketCode = extractTicketCodeFromUrl(tkUri);
+    if (!ticketCode) {
+      return { success: false, error_code: 'INVALID_FORMAT', message: 'Cannot extract ticket from [TK/URI] URL' };
+    }
+    qrData = { kind: 'ticket', ticketCode, orderCode: '', orderId: '', truckCode: '', truckId: '' };
+    d3Meta = { url: tkUri, format: 'd3-uri' };
+  }
+  // Rule 1: D3 hex format [TK/E]01000000...
+  else if (payload.startsWith(TK_PREFIX) && isD3Format(payload)) {
+    const url = decryptD3QrText(payload);
+    if (!url) {
+      return { success: false, error_code: 'DECRYPT_FAILED', message: 'D3 QR decryption failed (wrong passphrase or corrupted code)' };
+    }
+
+    // Check if URL points at our platform or D3's
+    try {
+      const parsed = new URL(url);
+      if (parsed.hostname === 'tkqrpdfapi.truckast.com') {
+        return {
+          success: false,
+          error_code: 'D3_EXTERNAL',
+          message: 'This D3 QR code does not point at a ticket on this platform.',
+          d3Url: url,
+        };
+      }
+    } catch { /* continue */ }
+
+    const ticketCode = extractTicketCodeFromUrl(url);
+    if (!ticketCode) {
+      return { success: false, error_code: 'INVALID_FORMAT', message: 'D3 QR decrypted but URL format not recognized' };
+    }
+
+    // Extract sig from URL
+    let sig = '';
+    try { sig = new URL(url).searchParams.get('sig') || ''; } catch {}
+
+    qrData = { kind: 'ticket', ticketCode, orderCode: '', orderId: '', truckCode: '', truckId: '' };
+    d3Meta = { url, sig, format: 'd3' };
+  }
+  // Rule 2: Legacy AES-256-GCM [TK/E] (base64 after prefix)
+  else if (payload.startsWith(TK_PREFIX)) {
     try {
       qrData = decryptQrPayload(payload);
     } catch (err) {
@@ -277,7 +395,9 @@ async function verifyQrPayload(payload, userAccess) {
         message: `Decryption failed: ${err.message}`,
       };
     }
-  } else if (payload.includes('|')) {
+  }
+  // Rule 4: Pipe-separated fallback
+  else if (payload.includes('|')) {
     qrData = parsePipePayload(payload);
     if (!qrData) {
       return {
@@ -320,6 +440,7 @@ async function verifyQrPayload(payload, userAccess) {
                 kind: 'ticket',
                 qrData,
                 security_mode,
+                d3Meta,
                 details: {
                   ticket,
                   order: orderData.order,
@@ -336,14 +457,11 @@ async function verifyQrPayload(payload, userAccess) {
       // Try by order code — look up order_id from orders table
       if (qrData.orderCode) {
         try {
-          const dbClient = getDbAdmin();
-          const { data: orderRow } = await dbClient
-            .from('orders')
-            .select('order_id')
-            .eq('order_code', qrData.orderCode)
-            .order('order_date', { ascending: false })
-            .limit(1)
-            .maybeSingle();
+          const orderRes = await executeDirectSQL(
+            'SELECT order_id FROM orders WHERE order_code = $1 ORDER BY order_date DESC LIMIT 1',
+            [qrData.orderCode]
+          );
+          const orderRow = orderRes.data?.[0] || null;
 
           if (orderRow?.order_id) {
             console.log('[QR] Found order_id via order_code:', qrData.orderCode, '→', orderRow.order_id);
@@ -378,22 +496,21 @@ async function verifyQrPayload(payload, userAccess) {
       // Fallback: direct DB lookup by ticket_code (no date filter)
       if (qrData.ticketCode) {
         try {
-          const dbClient = getDbAdmin();
-          const { data: ticketRow, error: ticketErr } = await dbClient
-            .from('tickets')
-            .select('*')
-            .eq('ticket_code', qrData.ticketCode)
-            .limit(1)
-            .maybeSingle();
+          const ticketRes = await executeDirectSQL(
+            'SELECT * FROM tickets WHERE ticket_code = $1 LIMIT 1',
+            [qrData.ticketCode]
+          );
+          const ticketRow = ticketRes.data?.[0] || null;
 
-          if (!ticketErr && ticketRow) {
+          if (ticketRow) {
             console.log('[QR] ✅ Ticket found via direct DB lookup:', ticketRow.ticket_code);
 
             // Get ALL product info for this ticket
-            const { data: allProductRows } = await dbClient
-              .from('ticket_products')
-              .select('id, ticket_id, item_code, description, short_description, is_mix, is_assoc, load_qty, delv_qty, delv_qty_unit, order_qty, order_qty_unit, ticket_qty, ticket_qty_unit, acc_delv_qty, slump')
-              .eq('ticket_id', ticketRow.ticket_id);
+            const tpRes = await executeDirectSQL(
+              'SELECT id, ticket_id, item_code, description, short_description, is_mix, is_assoc, load_qty, delv_qty, delv_qty_unit, order_qty, order_qty_unit, ticket_qty, ticket_qty_unit, acc_delv_qty, slump FROM ticket_products WHERE ticket_id = $1',
+              [ticketRow.ticket_id]
+            );
+            const allProductRows = tpRes.data;
             const productRow = (allProductRows || []).find(p => p.is_mix) || (allProductRows || [])[0];
             const productName = productRow?.item_code || null;
             const loadQty = productRow
@@ -403,23 +520,21 @@ async function verifyQrPayload(payload, userAccess) {
             // Get truck description and plant address
             let truckDesc = null;
             if (ticketRow.truck_code) {
-              const { data: truckRow } = await dbClient
-                .from('trucks')
-                .select('description')
-                .eq('code', ticketRow.truck_code)
-                .limit(1)
-                .maybeSingle();
+              const truckRes = await executeDirectSQL(
+                'SELECT description FROM trucks WHERE code = $1 LIMIT 1',
+                [ticketRow.truck_code]
+              );
+              const truckRow = truckRes.data?.[0] || null;
               truckDesc = truckRow?.description || null;
             }
 
             let plantAddress = null;
             if (ticketRow.plant_code) {
-              const { data: plantRow } = await dbClient
-                .from('plants')
-                .select('address1, address2, address3')
-                .eq('code', ticketRow.plant_code)
-                .limit(1)
-                .maybeSingle();
+              const plantRes = await executeDirectSQL(
+                'SELECT address1, address2, address3 FROM plants WHERE code = $1 LIMIT 1',
+                [ticketRow.plant_code]
+              );
+              const plantRow = plantRes.data?.[0] || null;
               if (plantRow) {
                 plantAddress = [plantRow.address1, plantRow.address2, plantRow.address3]
                   .filter(Boolean).join(', ') || null;
@@ -430,22 +545,18 @@ async function verifyQrPayload(payload, userAccess) {
             let orderRow = null;
             let orderSlump = null;
             if (ticketRow.order_id) {
-              const { data: oRow } = await dbClient
-                .from('orders')
-                .select('ordered_by_name, ordered_by_phone, purchase_order, customer_job')
-                .eq('order_id', ticketRow.order_id)
-                .limit(1)
-                .maybeSingle();
-              orderRow = oRow;
+              const oRes = await executeDirectSQL(
+                'SELECT ordered_by_name, ordered_by_phone, purchase_order, customer_job FROM orders WHERE order_id = $1 LIMIT 1',
+                [ticketRow.order_id]
+              );
+              orderRow = oRes.data?.[0] || null;
 
               // Get slump from order_products as fallback (ticket_products.slump may be null)
-              const { data: opRow } = await dbClient
-                .from('order_products')
-                .select('slump')
-                .eq('order_id', ticketRow.order_id)
-                .eq('is_mix', true)
-                .limit(1)
-                .maybeSingle();
+              const opRes = await executeDirectSQL(
+                'SELECT slump FROM order_products WHERE order_id = $1 AND is_mix = true LIMIT 1',
+                [ticketRow.order_id]
+              );
+              const opRow = opRes.data?.[0] || null;
               orderSlump = opRow?.slump || null;
             }
 
@@ -538,6 +649,7 @@ async function verifyQrPayload(payload, userAccess) {
                       kind: 'ticket',
                       qrData,
                       security_mode,
+                      d3Meta,
                       details: { ticket: richTicket, order, summary },
                     };
                   }
@@ -552,6 +664,7 @@ async function verifyQrPayload(payload, userAccess) {
               kind: 'ticket',
               qrData,
               security_mode,
+              d3Meta,
               details: { ticket, order, summary },
             };
           }
@@ -615,42 +728,8 @@ async function getTenantInfo(userAccess) {
   if (!userAccess?.id) return null;
 
   try {
-    const dbClient = getAuthDbAdmin();
-
-    let numericUserId = null;
-    if (typeof userAccess.id === 'number' || /^\d+$/.test(userAccess.id)) {
-      numericUserId = Number(userAccess.id);
-    } else {
-      const { data: uData } = await dbClient
-        .schema('auth_tenant')
-        .from('users')
-        .select('id')
-        .eq('uuid', userAccess.id)
-        .is('deleted_at', null)
-        .limit(1);
-      if (!uData || uData.length === 0) return null;
-      numericUserId = uData[0].id;
-    }
-
-    const { data: tuData } = await dbClient
-      .schema('auth_tenant')
-      .from('tenant_users')
-      .select('tenant_id')
-      .eq('user_id', numericUserId)
-      .eq('status', 'active')
-      .limit(1);
-    if (!tuData || tuData.length === 0) return null;
-
-    const { data: tData } = await dbClient
-      .schema('auth_tenant')
-      .from('tenants')
-      .select('id, uuid, name, subdomain, status, qr_user_active')
-      .eq('id', tuData[0].tenant_id)
-      .is('deleted_at', null)
-      .limit(1);
-    if (!tData || tData.length === 0) return null;
-
-    const t = tData[0];
+    const t = await fetchTenantForUserSQL(userAccess.id, ['id', 'uuid', 'name', 'subdomain', 'status', 'qr_user_active']);
+    if (!t) return null;
     return {
       tenantId: t.id,
       tenantUuid: t.uuid,
@@ -742,6 +821,10 @@ async function encryptPayload(body, userAccess) {
 
 module.exports = {
   decryptQrPayload,
+  decryptD3QrText,
+  isD3Format,
+  extractTicketCodeFromUrl,
+  parseTkUri,
   parsePipePayload,
   verifyQrPayload,
   getTenantQrSettings,

@@ -236,9 +236,19 @@ async function getTenantTimezoneForUser(userId) {
     }
 
     if (tResult.data[0].timezone) {
-      const tz = tResult.data[0].timezone;
-      // Support both { iana: "America/Chicago" } and plain string "America/Chicago"
-      const iana = typeof tz === 'string' ? tz : (tz.iana || null);
+      let tz = tResult.data[0].timezone;
+      // Direct Postgres may return jsonb as object or text/varchar as string.
+      // Parse JSON strings so we can extract the iana_code field.
+      if (typeof tz === 'string' && tz.startsWith('{')) {
+        try { tz = JSON.parse(tz); } catch { /* leave as-is */ }
+      }
+      let iana = null;
+      if (typeof tz === 'string') {
+        // Plain IANA string like "America/Chicago"
+        iana = tz.includes('/') ? tz : null;
+      } else if (typeof tz === 'object' && tz !== null) {
+        iana = tz.iana || tz.iana_code || null;
+      }
       return iana ? { iana } : DEFAULT_TIMEZONE;
     }
     // Tenant found but no timezone set — use default
@@ -600,14 +610,12 @@ async function authenticate(req, res, next) {
         if (cachedTz && (Date.now() - cachedTz.ts) < TZ_PREF_CACHE_TTL_MS) {
           if (cachedTz.iana) req.user.timezone = { iana: cachedTz.iana };
         } else {
-          const { getDbAdmin } = require('../config/database');
-          const dbClient = getDbAdmin();
-          const { data: prefRow } = await dbClient
-            .from('user_preferences')
-            .select('preference_value')
-            .eq('user_id', decoded.id)
-            .eq('preference_key', 'timezone')
-            .maybeSingle();
+          const prefResult = await executeDirectSQL(
+            `SELECT preference_value FROM user_preferences
+             WHERE user_id = $1 AND preference_key = 'timezone' LIMIT 1`,
+            [decoded.id]
+          );
+          const prefRow = prefResult.data.length > 0 ? prefResult.data[0] : null;
 
           let iana = null;
           const pv = prefRow?.preference_value;
@@ -621,12 +629,13 @@ async function authenticate(req, res, next) {
               // Numeric ID — look up iana_code from timezones table
               const tzId = typeof pv === 'number' ? pv : Number(pv);
               if (!isNaN(tzId)) {
-                const { data: tzRow } = await dbClient
-                  .from('timezones')
-                  .select('iana_code')
-                  .eq('id', tzId)
-                  .maybeSingle();
-                if (tzRow?.iana_code) iana = tzRow.iana_code;
+                const tzResult = await executeDirectSQL(
+                  'SELECT iana_code FROM timezones WHERE id = $1 LIMIT 1',
+                  [tzId]
+                );
+                if (tzResult.data.length > 0 && tzResult.data[0].iana_code) {
+                  iana = tzResult.data[0].iana_code;
+                }
               }
             }
           }

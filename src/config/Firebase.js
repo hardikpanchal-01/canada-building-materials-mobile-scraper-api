@@ -5,7 +5,7 @@ const path = require('path');
 let firebaseAdmin = null;
 
 try {
-  const serviceAccountPath = path.join(__dirname, 'truckast-app-firebase-adminsdk-fbsvc-9c40fa6a9f.json');
+  const serviceAccountPath = path.join(__dirname, 'truckast-app-firebase-adminsdk-fbsvc-8a1ab3b11e.json');
   
   // Initialize Firebase Admin if not already initialized
   if (!admin.apps.length) {

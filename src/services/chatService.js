@@ -1,4 +1,4 @@
-const { getDbAdmin } = require('../config/database');
+const { executeDirectSQL } = require('../utils/postgresExecutor');
 const deviceService = require('./deviceService');
 const { getMessaging } = require('../config/Firebase');
 
@@ -6,19 +6,16 @@ const { getMessaging } = require('../config/Firebase');
  * Get read status (last_read_at) for all orders the user has read
  */
 async function getReadStatus(userId) {
-  const dbClient = getDbAdmin();
-
-  const { data, error } = await dbClient
-    .from('chat_read_status')
-    .select('order_id, last_read_at')
-    .eq('user_id', userId);
-
-  if (error) {
+  try {
+    const result = await executeDirectSQL(
+      'SELECT order_id, last_read_at FROM chat_read_status WHERE user_id = $1',
+      [userId]
+    );
+    return result.data || [];
+  } catch (error) {
     console.error('[ChatService] getReadStatus error:', error.message);
     return [];
   }
-
-  return data || [];
 }
 
 /**
@@ -26,8 +23,6 @@ async function getReadStatus(userId) {
  * Compares chat_messages.created_at against chat_read_status.last_read_at.
  */
 async function getUnreadCounts(userId, orderIds) {
-  const dbClient = getDbAdmin();
-
   // Get user's read statuses
   const readStatuses = await getReadStatus(userId);
   const readMap = {};
@@ -39,20 +34,22 @@ async function getUnreadCounts(userId, orderIds) {
   const counts = {};
 
   // If specific orderIds provided, filter to those; otherwise get all
-  let query = dbClient
-    .from('chat_messages')
-    .select('order_id, created_at')
-    .eq('is_deleted', false)
-    .neq('sender_id', userId)
-    .order('created_at', { ascending: false });
+  let sql = `SELECT order_id, created_at FROM chat_messages
+             WHERE is_deleted = false AND sender_id::text <> $1`;
+  const params = [userId];
 
   if (orderIds && orderIds.length > 0) {
-    query = query.in('order_id', orderIds);
+    sql += ' AND order_id = ANY($2)';
+    params.push(orderIds);
   }
 
-  const { data: messages, error } = await query;
+  sql += ' ORDER BY created_at DESC';
 
-  if (error) {
+  let messages;
+  try {
+    const result = await executeDirectSQL(sql, params);
+    messages = result.data;
+  } catch (error) {
     console.error('[ChatService] getUnreadCounts error:', error.message);
     return { counts: {}, total_unread: 0 };
   }
@@ -79,30 +76,23 @@ async function getUnreadCounts(userId, orderIds) {
  * Upserts into chat_read_status with current timestamp.
  */
 async function markAsRead(userId, orderId) {
-  const dbClient = getDbAdmin();
-
   // Add 2-second buffer to catch in-flight messages
   const lastReadAt = new Date(Date.now() + 2000).toISOString();
 
-  const { data, error } = await dbClient
-    .from('chat_read_status')
-    .upsert(
-      {
-        user_id: userId,
-        order_id: orderId,
-        last_read_at: lastReadAt,
-      },
-      { onConflict: 'user_id,order_id' }
-    )
-    .select()
-    .single();
-
-  if (error) {
+  try {
+    const result = await executeDirectSQL(
+      `INSERT INTO chat_read_status (user_id, order_id, last_read_at)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (user_id, order_id)
+       DO UPDATE SET last_read_at = EXCLUDED.last_read_at
+       RETURNING *`,
+      [userId, orderId, lastReadAt]
+    );
+    return result.data && result.data.length > 0 ? result.data[0] : null;
+  } catch (error) {
     console.error('[ChatService] markAsRead error:', error.message);
     throw new Error(`Failed to mark as read: ${error.message}`);
   }
-
-  return data;
 }
 
 function truncate(text, max = 120) {

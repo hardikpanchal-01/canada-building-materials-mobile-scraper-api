@@ -8,8 +8,8 @@
  * 4. Exchange code for user information
  */
 
-const { getAuthDbAdmin } = require('../config/authDatabase');
-const { getDbAdmin } = require('../config/database');
+const { executeAuthSQL } = require('../config/authPostgres');
+const { executeDirectSQL } = require('../utils/postgresExecutor');
 const { createAuthCode, consumeAuthCode, CODE_EXPIRY_SECONDS } = require('./authCodeService');
 const { verifyPassword, secureCompare, decryptTenantSecret } = require('../utils/encryptionUtils');
 const { generateAccessToken, generateRefreshToken } = require('../utils/jwtUtils');
@@ -86,28 +86,18 @@ function resolveTenantClientSecret(tenant) {
  * @returns {Object|null} User record
  */
 async function getUserByEmail(email) {
-  const dbClient = getAuthDbAdmin();
   const normalizedEmail = email.toLowerCase().trim();
 
-  // Use .schema('auth_tenant') to explicitly specify the schema
-  const { data, error } = await dbClient
-    .schema('auth_tenant')
-    .from('users')
-    .select('*')
-    .eq('email', normalizedEmail)
-    .is('deleted_at', null)
-    .limit(1);
+  const result = await executeAuthSQL(
+    'SELECT * FROM users WHERE email = $1 AND deleted_at IS NULL LIMIT 1',
+    [normalizedEmail]
+  );
 
-  if (error) {
+  if (!result.success || !result.data || result.data.length === 0) {
     return null;
   }
 
-  if (!data || data.length === 0) {
-    return null;
-  }
-
-  const user = data[0];
-  return user;
+  return result.data[0];
 }
 
 /**
@@ -116,21 +106,16 @@ async function getUserByEmail(email) {
  * @returns {Object|null} User record
  */
 async function getUserById(userId) {
-  const dbClient = getAuthDbAdmin();
+  const result = await executeAuthSQL(
+    'SELECT * FROM users WHERE id = $1 AND deleted_at IS NULL LIMIT 1',
+    [userId]
+  );
 
-  const { data, error } = await dbClient
-    .schema('auth_tenant')
-    .from('users')
-    .select('*')
-    .eq('id', userId)
-    .is('deleted_at', null)
-    .limit(1);
-
-  if (error) {
+  if (!result.success || !result.data || result.data.length === 0) {
     return null;
   }
 
-  return data && data.length > 0 ? data[0] : null;
+  return result.data[0];
 }
 
 /**
@@ -140,26 +125,23 @@ async function getUserById(userId) {
  * @returns {Object|null} Tenant user record with tenant details
  */
 async function getTenantUser(userId, tenantId = null) {
-  const dbClient = getAuthDbAdmin();
-
-  let query = dbClient
-    .schema('auth_tenant')
-    .from('tenant_users')
-    .select('*')
-    .eq('user_id', userId)
-    .eq('status', 'active');
+  let sql = 'SELECT * FROM tenant_users WHERE user_id = $1 AND status = $2';
+  const params = [userId, 'active'];
 
   if (tenantId) {
-    query = query.eq('tenant_id', tenantId);
+    sql += ' AND tenant_id = $3';
+    params.push(tenantId);
   }
 
-  const { data, error } = await query.limit(1);
+  sql += ' LIMIT 1';
 
-  if (error) {
+  const result = await executeAuthSQL(sql, params);
+
+  if (!result.success || !result.data || result.data.length === 0) {
     return null;
   }
 
-  return data && data.length > 0 ? data[0] : null;
+  return result.data[0];
 }
 
 /**
@@ -168,45 +150,29 @@ async function getTenantUser(userId, tenantId = null) {
  * @returns {Object|null} Tenant user record with tenant info
  */
 async function getUserTenantWithDetails(userId) {
-  const dbClient = getAuthDbAdmin();
-
   // Get tenant_user record for this user (active status)
-  const { data: tuData, error: tuError } = await dbClient
-    .schema('auth_tenant')
-    .from('tenant_users')
-    .select('*')
-    .eq('user_id', userId)
-    .eq('status', 'active')
-    .limit(1);
+  const tuResult = await executeAuthSQL(
+    'SELECT * FROM tenant_users WHERE user_id = $1 AND status = $2 LIMIT 1',
+    [userId, 'active']
+  );
 
-  if (tuError) {
+  if (!tuResult.success || !tuResult.data || tuResult.data.length === 0) {
     return null;
   }
 
-  if (!tuData || tuData.length === 0) {
-    return null;
-  }
-
-  const tenantUser = tuData[0];
+  const tenantUser = tuResult.data[0];
 
   // Get tenant details
-  const { data: tData, error: tError } = await dbClient
-    .schema('auth_tenant')
-    .from('tenants')
-    .select('id, uuid, name, subdomain, redirect_url, client_id, client_secret, status, settings, backend_url, qr_enabled, qr_mode, qr_user_active, timezone')
-    .eq('id', tenantUser.tenant_id)
-    .is('deleted_at', null)
-    .limit(1);
+  const tResult = await executeAuthSQL(
+    'SELECT id, uuid, name, subdomain, redirect_url, client_id, client_secret, status, settings, backend_url, qr_enabled, qr_mode, qr_user_active, timezone FROM tenants WHERE id = $1 AND deleted_at IS NULL LIMIT 1',
+    [tenantUser.tenant_id]
+  );
 
-  if (tError) {
+  if (!tResult.success || !tResult.data || tResult.data.length === 0) {
     return null;
   }
 
-  if (!tData || tData.length === 0) {
-    return null;
-  }
-
-  const tenant = tData[0];
+  const tenant = tResult.data[0];
 
   return {
     tenantUser,
@@ -219,21 +185,20 @@ async function getUserTenantWithDetails(userId) {
  * @param {Object} params - Attempt parameters
  */
 async function recordLoginAttempt({ email, userId, tenantId, success, failureReason, ipAddress, userAgent }) {
-  const dbClient = getAuthDbAdmin();
-
   try {
-    await dbClient
-      .schema('auth_tenant')
-      .from('login_attempts')
-      .insert({
-        email: email?.toLowerCase()?.trim(),
-        user_id: userId || null,
-        tenant_id: tenantId || null,
+    await executeAuthSQL(
+      `INSERT INTO login_attempts (email, user_id, tenant_id, success, failure_reason, ip_address, user_agent)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [
+        email?.toLowerCase()?.trim(),
+        userId || null,
+        tenantId || null,
         success,
-        failure_reason: failureReason || null,
-        ip_address: ipAddress || null,
-        user_agent: userAgent || null
-      });
+        failureReason || null,
+        ipAddress || null,
+        userAgent || null
+      ]
+    );
   } catch (error) {
     // Don't fail the login if logging fails
     console.error('Failed to record login attempt:', error);
@@ -245,14 +210,11 @@ async function recordLoginAttempt({ email, userId, tenantId, success, failureRea
  * @param {number} userId - User ID
  */
 async function updateLastLogin(userId) {
-  const dbClient = getAuthDbAdmin();
-
   try {
-    await dbClient
-      .schema('auth_tenant')
-      .from('users')
-      .update({ last_login_at: new Date().toISOString() })
-      .eq('id', userId);
+    await executeAuthSQL(
+      'UPDATE users SET last_login_at = $1 WHERE id = $2',
+      [new Date().toISOString(), userId]
+    );
   } catch (error) {
     console.error('Failed to update last login:', error);
   }
@@ -553,19 +515,15 @@ async function exchangeCodeForUserInfo({ code, client_secret, device_info }) {
     // device registration if no tenant user row exists for this email.
     if (device_info) {
       try {
-        const tenantDb = getDbAdmin();
-        const { data: tenantUserRows, error: tenantUserErr } = await tenantDb
-          .from('users')
-          .select('id')
-          .eq('email', user.email.toLowerCase().trim())
-          .limit(1);
+        const tenantUserResult = await executeDirectSQL(
+          "SELECT id FROM users WHERE email = $1 LIMIT 1",
+          [user.email.toLowerCase().trim()]
+        );
 
-        if (tenantUserErr) {
-          console.error('⚠️  Tenant user lookup failed during exchange-code:', tenantUserErr.message);
-        } else if (!tenantUserRows || tenantUserRows.length === 0) {
+        if (!tenantUserResult.data || tenantUserResult.data.length === 0) {
           console.warn(`⚠️  No tenant user row found for ${user.email}; skipping device registration`);
         } else {
-          await deviceService.registerOrUpdateDevice(tenantUserRows[0].id, device_info);
+          await deviceService.registerOrUpdateDevice(tenantUserResult.data[0].id, device_info);
         }
       } catch (deviceError) {
         // Log device registration error but don't fail login (same behavior as /api/auth/login)
@@ -583,32 +541,31 @@ async function exchangeCodeForUserInfo({ code, client_secret, device_info }) {
     let userTimezone = CDT_DEFAULT;
     let companyTimezone = null;
     try {
-      const tenantDb = getDbAdmin();
+      const TZ_COLUMNS = 'id, iana_code, display_name, abbreviation, utc_offset, dst_offset';
 
       // Resolve company/tenant timezone first (always needed for company_timezone field)
       if (tenant.timezone) {
         const tenantTz = tenant.timezone;
         const ianaCode = typeof tenantTz === 'string' ? tenantTz : (tenantTz.iana || tenantTz.iana_code);
         if (ianaCode) {
-          const { data: companyTzData } = await tenantDb
-            .from('timezones')
-            .select('id, iana_code, display_name, abbreviation, utc_offset, dst_offset')
-            .eq('iana_code', ianaCode)
-            .maybeSingle();
+          const companyTzResult = await executeDirectSQL(
+            `SELECT ${TZ_COLUMNS} FROM timezones WHERE iana_code = $1 LIMIT 1`,
+            [ianaCode]
+          );
 
-          if (companyTzData) {
-            companyTimezone = companyTzData;
+          if (companyTzResult.data.length > 0) {
+            companyTimezone = companyTzResult.data[0];
           }
         }
       }
 
       // Check user's saved preference first
-      const { data: prefData } = await tenantDb
-        .from('user_preferences')
-        .select('preference_value')
-        .eq('user_id', user.uuid)
-        .eq('preference_key', 'timezone')
-        .maybeSingle();
+      const prefResult = await executeDirectSQL(
+        `SELECT preference_value FROM user_preferences
+         WHERE user_id = $1 AND preference_key = 'timezone' LIMIT 1`,
+        [user.uuid]
+      );
+      const prefData = prefResult.data.length > 0 ? prefResult.data[0] : null;
 
       if (prefData?.preference_value != null) {
         const pv = prefData.preference_value;
@@ -616,23 +573,21 @@ async function exchangeCodeForUserInfo({ code, client_secret, device_info }) {
 
         // Handle object format: { iana: "America/Chicago" }
         if (typeof pv === 'object' && pv.iana) {
-          const { data } = await tenantDb
-            .from('timezones')
-            .select('id, iana_code, display_name, abbreviation, utc_offset, dst_offset')
-            .eq('iana_code', pv.iana)
-            .maybeSingle();
-          tzData = data;
+          const tzResult = await executeDirectSQL(
+            `SELECT ${TZ_COLUMNS} FROM timezones WHERE iana_code = $1 LIMIT 1`,
+            [pv.iana]
+          );
+          tzData = tzResult.data.length > 0 ? tzResult.data[0] : null;
         }
         // Handle numeric ID format: 2
         else {
           const tzId = typeof pv === 'number' ? pv : Number(pv);
           if (!isNaN(tzId)) {
-            const { data } = await tenantDb
-              .from('timezones')
-              .select('id, iana_code, display_name, abbreviation, utc_offset, dst_offset')
-              .eq('id', tzId)
-              .maybeSingle();
-            tzData = data;
+            const tzResult = await executeDirectSQL(
+              `SELECT ${TZ_COLUMNS} FROM timezones WHERE id = $1 LIMIT 1`,
+              [tzId]
+            );
+            tzData = tzResult.data.length > 0 ? tzResult.data[0] : null;
           }
         }
 
@@ -712,45 +667,48 @@ async function exchangeCodeForUserInfo({ code, client_secret, device_info }) {
  */
 async function getUserTenants(userId) {
   try {
-    const dbClient = getAuthDbAdmin();
-
     // Get all active tenant_user records for this user
-    const { data: tuData, error: tuError } = await dbClient
-      .schema('auth_tenant')
-      .from('tenant_users')
-      .select('tenant_id')
-      .eq('user_id', userId)
-      .eq('status', 'active');
+    const tuResult = await executeAuthSQL(
+      'SELECT tenant_id FROM tenant_users WHERE user_id = $1 AND status = $2',
+      [userId, 'active']
+    );
 
-    if (tuError) {
-      console.error('[MobileAuth] Error fetching tenant_users:', tuError.message);
+    if (!tuResult.success) {
+      console.error('[MobileAuth] Error fetching tenant_users:', tuResult.error);
       return { success: false, error_code: ERROR_CODES.SERVER_ERROR, message: ERROR_MESSAGES.SERVER_ERROR };
     }
 
-    if (!tuData || tuData.length === 0) {
+    if (!tuResult.data || tuResult.data.length === 0) {
       return { success: true, data: [] };
     }
 
-    const tenantIds = tuData.map(tu => tu.tenant_id);
+    const tenantIds = tuResult.data.map(tu => tu.tenant_id);
+
+    // Build parameterized IN clause: $1, $2, $3, ...
+    const placeholders = tenantIds.map((_, i) => `$${i + 1}`).join(', ');
+    const params = [...tenantIds];
+    const statusIdx = params.length + 1;
+    params.push('active');
 
     // Get tenant details for all matching tenants
-    const { data: tenants, error: tError } = await dbClient
-      .schema('auth_tenant')
-      .from('tenants')
-      .select('id, uuid, name, subdomain, backend_url, status, image_url')
-      .in('id', tenantIds)
-      .is('deleted_at', null)
-      .eq('status', 'active')
-      .order('name', { ascending: true });
+    const tResult = await executeAuthSQL(
+      `SELECT id, uuid, name, subdomain, backend_url, status, image_url
+       FROM tenants
+       WHERE id IN (${placeholders})
+         AND deleted_at IS NULL
+         AND status = $${statusIdx}
+       ORDER BY name ASC`,
+      params
+    );
 
-    if (tError) {
-      console.error('[MobileAuth] Error fetching tenants:', tError.message);
+    if (!tResult.success) {
+      console.error('[MobileAuth] Error fetching tenants:', tResult.error);
       return { success: false, error_code: ERROR_CODES.SERVER_ERROR, message: ERROR_MESSAGES.SERVER_ERROR };
     }
 
     return {
       success: true,
-      data: (tenants || []).map(t => ({
+      data: (tResult.data || []).map(t => ({
         id: t.id,
         uuid: t.uuid,
         name: t.name,
@@ -777,22 +735,17 @@ async function getUserTenants(userId) {
  */
 async function generateSwitchCode({ userId, email, targetSubdomain }) {
   try {
-    const dbClient = getAuthDbAdmin();
-
     // Step 1: Look up target tenant by subdomain
-    const { data: tData, error: tError } = await dbClient
-      .schema('auth_tenant')
-      .from('tenants')
-      .select('id, uuid, name, subdomain, redirect_url, client_id, client_secret, status, backend_url, qr_enabled, qr_mode, qr_user_active')
-      .eq('subdomain', targetSubdomain.toLowerCase().trim())
-      .is('deleted_at', null)
-      .limit(1);
+    const tResult = await executeAuthSQL(
+      'SELECT id, uuid, name, subdomain, redirect_url, client_id, client_secret, status, backend_url, qr_enabled, qr_mode, qr_user_active FROM tenants WHERE subdomain = $1 AND deleted_at IS NULL LIMIT 1',
+      [targetSubdomain.toLowerCase().trim()]
+    );
 
-    if (tError || !tData || tData.length === 0) {
+    if (!tResult.success || !tResult.data || tResult.data.length === 0) {
       return { success: false, error_code: ERROR_CODES.NO_TENANT, message: ERROR_MESSAGES.NO_TENANT };
     }
 
-    const tenant = tData[0];
+    const tenant = tResult.data[0];
 
     if (tenant.status !== 'active') {
       return { success: false, error_code: ERROR_CODES.TENANT_SUSPENDED, message: ERROR_MESSAGES.TENANT_SUSPENDED };

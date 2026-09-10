@@ -7,7 +7,7 @@
  * - Validate client credentials for code exchange
  */
 
-const { getAuthDbAdmin } = require('../config/authDatabase');
+const { executeAuthSQL } = require('../config/authPostgres');
 const { decrypt, secureCompare } = require('../utils/encryptionUtils');
 
 // In-memory cache for tenant lookups by subdomain (10-minute TTL)
@@ -30,29 +30,24 @@ async function getTenantBySubdomain(subdomain) {
     return cached.data;
   }
 
-  const dbClient = getAuthDbAdmin();
+  const result = await executeAuthSQL(
+    'SELECT id, uuid, name, subdomain, redirect_url, client_id, status, settings FROM tenants WHERE subdomain = $1 AND deleted_at IS NULL LIMIT 1',
+    [normalizedSubdomain]
+  );
 
-  const { data, error } = await dbClient
-    .schema('auth_tenant')
-    .from('tenants')
-    .select('id, uuid, name, subdomain, redirect_url, client_id, status, settings')
-    .eq('subdomain', normalizedSubdomain)
-    .is('deleted_at', null)
-    .limit(1);
-
-  if (error) {
-    console.log('[TenantService] getTenantBySubdomain error:', error.message);
+  if (!result.success) {
+    console.log('[TenantService] getTenantBySubdomain error:', result.error);
     return null;
   }
 
-  if (!data || data.length === 0) {
+  if (!result.data || result.data.length === 0) {
     // Cache null results too (prevents repeated DB hits for invalid subdomains)
     _tenantCache.set(normalizedSubdomain, { data: null, timestamp: Date.now() });
     return null;
   }
 
-  const tenant = data[0];
-  const result = {
+  const tenant = result.data[0];
+  const tenantConfig = {
     id: tenant.id,
     uuid: tenant.uuid,
     name: tenant.name,
@@ -63,8 +58,8 @@ async function getTenantBySubdomain(subdomain) {
     settings: tenant.settings || {}
   };
 
-  _tenantCache.set(normalizedSubdomain, { data: result, timestamp: Date.now() });
-  return result;
+  _tenantCache.set(normalizedSubdomain, { data: tenantConfig, timestamp: Date.now() });
+  return tenantConfig;
 }
 
 /**
@@ -73,22 +68,17 @@ async function getTenantBySubdomain(subdomain) {
  * @returns {Object|null} Full tenant data
  */
 async function getTenantById(tenantId) {
-  const dbClient = getAuthDbAdmin();
+  const result = await executeAuthSQL(
+    'SELECT * FROM tenants WHERE id = $1 AND deleted_at IS NULL LIMIT 1',
+    [tenantId]
+  );
 
-  const { data, error } = await dbClient
-    .schema('auth_tenant')
-    .from('tenants')
-    .select('*')
-    .eq('id', tenantId)
-    .is('deleted_at', null)
-    .limit(1);
-
-  if (error) {
-    console.log('[TenantService] getTenantById error:', error.message);
+  if (!result.success) {
+    console.log('[TenantService] getTenantById error:', result.error);
     return null;
   }
 
-  return data && data.length > 0 ? data[0] : null;
+  return result.data && result.data.length > 0 ? result.data[0] : null;
 }
 
 /**
@@ -97,26 +87,21 @@ async function getTenantById(tenantId) {
  * @returns {Object|null} Tenant data with decrypted secrets
  */
 async function getTenantByClientId(clientId) {
-  const dbClient = getAuthDbAdmin();
+  const result = await executeAuthSQL(
+    'SELECT * FROM tenants WHERE client_id = $1 AND deleted_at IS NULL LIMIT 1',
+    [clientId]
+  );
 
-  const { data, error } = await dbClient
-    .schema('auth_tenant')
-    .from('tenants')
-    .select('*')
-    .eq('client_id', clientId)
-    .is('deleted_at', null)
-    .limit(1);
-
-  if (error) {
-    console.log('[TenantService] getTenantByClientId error:', error.message);
+  if (!result.success) {
+    console.log('[TenantService] getTenantByClientId error:', result.error);
     return null;
   }
 
-  if (!data || data.length === 0) {
+  if (!result.data || result.data.length === 0) {
     return null;
   }
 
-  const tenant = data[0];
+  const tenant = result.data[0];
 
   // Decrypt sensitive fields
   let decryptedData = { ...tenant };

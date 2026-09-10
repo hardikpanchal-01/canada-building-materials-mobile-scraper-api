@@ -14,16 +14,10 @@
  */
 
 const chatService = require('./chatService');
-const { makeClient } = require('../db/client');
-const { getPool } = require('../services/database/postgresClient');
+const { executeDirectSQL } = require('../utils/postgresExecutor');
 const { createRealtimeListener } = require('../db/realtimeListener');
 
 let listener = null;
-
-// A direct-Postgres data client for the lookups the handlers perform.
-function dataClient() {
-  return makeClient({ pool: getPool(), schema: 'public' });
-}
 
 function buildPreview(text, attachments) {
   if (text && text.trim().length > 0) {
@@ -35,48 +29,45 @@ function buildPreview(text, attachments) {
   return '';
 }
 
-async function fetchActiveRecipients(db, senderId) {
-  const { data, error } = await db
-    .from('users')
-    .select('id')
-    .eq('active', true);
-
-  if (error) {
-    console.error('[ChatRealtime] failed to load recipients:', error.message);
+async function fetchActiveRecipients(senderId) {
+  try {
+    const result = await executeDirectSQL(
+      'SELECT id FROM users WHERE active = true',
+      []
+    );
+    return (result.data || [])
+      .map((u) => u.id)
+      .filter((id) => id && id !== senderId);
+  } catch (err) {
+    console.error('[ChatRealtime] failed to load recipients:', err.message);
     return [];
   }
-
-  return (data || [])
-    .map((u) => u.id)
-    .filter((id) => id && id !== senderId);
 }
 
-async function fetchOrderMeta(db, orderId) {
-  const { data, error } = await db
-    .from('orders')
-    .select('order_id, order_code, order_date, customer_name')
-    .eq('order_id', orderId)
-    .maybeSingle();
-
-  if (error) {
-    console.error('[ChatRealtime] failed to load order meta:', error.message);
+async function fetchOrderMeta(orderId) {
+  try {
+    const result = await executeDirectSQL(
+      'SELECT order_id, order_code, order_date, customer_name FROM orders WHERE order_id = $1 LIMIT 1',
+      [orderId]
+    );
+    return result.data?.[0] || null;
+  } catch (err) {
+    console.error('[ChatRealtime] failed to load order meta:', err.message);
     return null;
   }
-  return data || null;
 }
 
-async function fetchOrderEntityMeta(db, orderEntityId) {
-  const { data, error } = await db
-    .from('order_entities')
-    .select('id, job_name, company_name, on_job_date')
-    .eq('id', orderEntityId)
-    .maybeSingle();
-
-  if (error) {
-    console.error('[ChatRealtime] failed to load order_entity meta:', error.message);
+async function fetchOrderEntityMeta(orderEntityId) {
+  try {
+    const result = await executeDirectSQL(
+      'SELECT id, job_name, company_name, on_job_date FROM order_entities WHERE id = $1 LIMIT 1',
+      [orderEntityId]
+    );
+    return result.data?.[0] || null;
+  } catch (err) {
+    console.error('[ChatRealtime] failed to load order_entity meta:', err.message);
     return null;
   }
-  return data || null;
 }
 
 async function handleInsert(payload) {
@@ -86,10 +77,9 @@ async function handleInsert(payload) {
   if (!row.sender_id || !row.order_id) return;
 
   try {
-    const db = dataClient();
     const [recipients, orderMeta] = await Promise.all([
-      fetchActiveRecipients(db, row.sender_id),
-      fetchOrderMeta(db, row.order_id),
+      fetchActiveRecipients(row.sender_id),
+      fetchOrderMeta(row.order_id),
     ]);
 
     if (recipients.length === 0) {
@@ -126,10 +116,9 @@ async function handleOrderEntityInsert(payload) {
   if (!row.sender_id || !row.order_entity_id) return;
 
   try {
-    const db = dataClient();
     const [recipients, meta] = await Promise.all([
-      fetchActiveRecipients(db, row.sender_id),
-      fetchOrderEntityMeta(db, row.order_entity_id),
+      fetchActiveRecipients(row.sender_id),
+      fetchOrderEntityMeta(row.order_entity_id),
     ]);
 
     if (recipients.length === 0) {

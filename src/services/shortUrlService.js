@@ -7,7 +7,7 @@
  * - Increment click count
  */
 
-const { getAuthDbAdmin } = require('../config/authDatabase');
+const { executeAuthSQL } = require('../config/authPostgres');
 
 /**
  * Resolve a short URL by its code
@@ -15,27 +15,23 @@ const { getAuthDbAdmin } = require('../config/authDatabase');
  * @returns {Object} { success, data, error, error_code }
  */
 async function resolveShortUrl(code) {
-  const dbClient = getAuthDbAdmin();
-
   // Look up the short URL record
-  const { data, error: fetchError } = await dbClient
-    .schema('auth_tenant')
-    .from('short_urls')
-    .select('id, code, tenant_slug, original_url, expires_at, click_count')
-    .eq('code', code)
-    .limit(1);
+  const result = await executeAuthSQL(
+    'SELECT id, code, tenant_slug, original_url, expires_at, click_count FROM short_urls WHERE code = $1 LIMIT 1',
+    [code]
+  );
 
-  if (fetchError) {
-    console.error('[ShortUrl] Database error:', fetchError.message);
+  if (!result.success) {
+    console.error('[ShortUrl] Database error:', result.error);
     return { success: false, data: null, error: 'Failed to resolve short URL', error_code: 'DB_ERROR' };
   }
 
-  if (!data || data.length === 0) {
+  if (!result.data || result.data.length === 0) {
     console.warn('[ShortUrl] Code not found:', code);
     return { success: false, data: null, error: 'Short URL not found', error_code: 'NOT_FOUND' };
   }
 
-  const record = data[0];
+  const record = result.data[0];
 
   // Check expiry if expires_at is set
   if (record.expires_at) {
@@ -47,27 +43,12 @@ async function resolveShortUrl(code) {
   }
 
   // Increment click_count atomically and update last_accessed_at (fire-and-forget)
-  dbClient
-    .rpc('increment_short_url_click', { short_url_id: record.id })
-    .then(({ error: updateError }) => {
-      if (updateError) {
-        // Fallback to non-atomic update if RPC not available
-        console.warn('[ShortUrl] RPC increment failed, using fallback:', updateError.message);
-        dbClient
-          .schema('auth_tenant')
-          .from('short_urls')
-          .update({
-            click_count: (record.click_count || 0) + 1,
-            last_accessed_at: new Date().toISOString(),
-          })
-          .eq('id', record.id)
-          .then(({ error: fallbackError }) => {
-            if (fallbackError) {
-              console.error('[ShortUrl] Fallback increment also failed:', fallbackError.message);
-            }
-          });
-      }
-    });
+  executeAuthSQL(
+    'UPDATE short_urls SET click_count = click_count + 1, last_accessed_at = NOW() WHERE id = $1',
+    [record.id]
+  ).catch((err) => {
+    console.error('[ShortUrl] Click increment failed:', err.message);
+  });
 
   return {
     success: true,

@@ -4,11 +4,11 @@
  * Handles password reset requests with:
  * - Rate limiting (5 minutes per email)
  * - User verification
- * - Token generation via Postgres Admin API
+ * - Token generation via Auth API
  * - Password reset email sending
  */
 
-const { getDbAdmin } = require('../config/database');
+const crypto = require('crypto');
 const { executeDirectSQL } = require('../utils/postgresExecutor');
 const nodemailer = require('nodemailer');
 
@@ -50,7 +50,7 @@ function setRateLimit(email) {
 
 /**
  * Verify if user exists in the system
- * First checks users table, then falls back to Postgres auth.users
+ * First checks users table, then falls back to auth.users
  * @param {string} email - User email
  * @returns {object|null} User data or null if not found
  */
@@ -76,41 +76,16 @@ async function verifyUserExists(email) {
       };
     }
 
-    // Step 2: Fall back to checking auth.users via Postgres Admin API
-    const dbAdmin = getDbAdmin();
+    // Step 2: Fall back to checking auth.users directly
+    const authResult = await executeDirectSQL(
+      'SELECT id, email FROM auth.users WHERE lower(email) = $1 AND deleted_at IS NULL LIMIT 1',
+      [normalizedEmail]
+    );
 
-    // Paginated listUsers to avoid loading ALL users into memory
-    let page = 1;
-    const perPage = 1000;
-    let authUser = null;
-
-    while (!authUser) {
-      const { data: authData, error: authError } = await dbAdmin.auth.admin.listUsers({
-        page,
-        perPage
-      });
-
-      if (authError) {
-        console.error('Error checking auth.users:', authError.message);
-        break;
-      }
-
-      if (!authData || !authData.users || authData.users.length === 0) {
-        break;
-      }
-
-      authUser = authData.users.find(
-        u => u.email && u.email.toLowerCase() === normalizedEmail
-      );
-
-      if (authData.users.length < perPage) break;
-      page++;
-    }
-
-    if (authUser) {
+    if (authResult.data.length > 0) {
       return {
-        id: authUser.id,
-        email: authUser.email,
+        id: authResult.data[0].id,
+        email: authResult.data[0].email,
         source: 'auth_users'
       };
     }
@@ -123,7 +98,7 @@ async function verifyUserExists(email) {
 }
 
 /**
- * Generate password reset token using Postgres Admin API
+ * Generate password reset token using Auth API
  * @param {string} email - User email
  * @param {string} redirectTo - URL to redirect after password reset
  * @returns {object} { success: boolean, token?: string, error?: string }
@@ -132,45 +107,27 @@ async function generateResetToken(email, redirectTo) {
   const normalizedEmail = email.toLowerCase().trim();
 
   try {
-    const dbAdmin = getDbAdmin();
+    // Generate a secure recovery token and store it on the auth user row
+    // (auth.users.recovery_token / recovery_sent_at — same columns the previous
+    // auth backend used, so the web reset-password flow keeps working).
+    const token = crypto.randomBytes(24).toString('hex');
 
-    // Generate recovery link using Postgres Admin API
-    const { data, error } = await dbAdmin.auth.admin.generateLink({
-      type: 'recovery',
-      email: normalizedEmail,
-      options: {
-        redirectTo: redirectTo || process.env.PASSWORD_RESET_REDIRECT_URL || (process.env.NEXT_PUBLIC_APP_URL ? `${process.env.NEXT_PUBLIC_APP_URL}/reset-password` : 'http://localhost:3000/reset-password')
-      }
-    });
+    const result = await executeDirectSQL(
+      `UPDATE auth.users
+       SET recovery_token = $1, recovery_sent_at = NOW(), updated_at = NOW()
+       WHERE lower(email) = $2 AND deleted_at IS NULL
+       RETURNING id`,
+      [token, normalizedEmail]
+    );
 
-    if (error) {
-      console.error('Error generating reset link:', error.message);
-      return { success: false, error: error.message };
-    }
-
-    if (!data || !data.properties || !data.properties.hashed_token) {
-      // Extract token from the action link if hashed_token not available
-      if (data && data.properties && data.properties.action_link) {
-        const actionLink = data.properties.action_link;
-        const urlParams = new URL(actionLink);
-        const token = urlParams.searchParams.get('token') || urlParams.hash.split('access_token=')[1]?.split('&')[0];
-
-        if (token) {
-          return {
-            success: true,
-            token: token,
-            actionLink: actionLink
-          };
-        }
-      }
-
+    if (result.data.length === 0) {
       return { success: false, error: 'Failed to generate reset token' };
     }
 
     return {
       success: true,
-      token: data.properties.hashed_token,
-      actionLink: data.properties.action_link
+      token,
+      actionLink: null
     };
   } catch (error) {
     console.error('Error generating reset token:', error.message);

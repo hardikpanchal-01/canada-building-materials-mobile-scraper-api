@@ -155,6 +155,9 @@ app.get('/.well-known/assetlinks.json', (req, res) => {
 // Serve public PDF documents (NRMCA CIP guides) for mobile clients
 app.use('/pdfs', express.static(path.join(__dirname, 'public', 'pdfs')));
 
+// Serve uploaded chat files (images, audio)
+app.use('/uploads', express.static(path.join(__dirname, 'public', 'uploads')));
+
 // Explicit PDF endpoint as fallback (in case express.static fails on deployed server)
 app.get('/api/pdfs/:filename', (req, res) => {
   const allowedFiles = [
@@ -201,6 +204,7 @@ app.use('/api/ai', require('./src/routes/nlqRoutes'));
 app.use('/api/ai', require('./src/routes/aiAssistantRoutes'));
 app.use('/api/chat', require('./src/routes/chatRoutes'));
 app.use('/api/qr', require('./src/routes/qrRoutes'));
+app.use('/api/daily-intelligence', require('./src/routes/dailyIntelligenceRoutes'));
 
 // Mobile Federated Authentication Routes
 app.use('/api/auth/mobile', require('./src/routes/mobileAuthRoutes'));

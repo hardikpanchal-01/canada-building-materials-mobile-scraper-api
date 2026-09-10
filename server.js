@@ -18,6 +18,7 @@ const {
   startChatRealtimeListener,
   stopChatRealtimeListener,
 } = require('./src/services/chatRealtimeListener');
+const { closeAuthPool } = require('./src/config/authPostgres');
 const { startPlantWeatherWorker } = require('./src/workers/plantWeatherWorker');
 
 const PORT = process.env.PORT || 3000;
@@ -153,11 +154,13 @@ async function gracefulShutdown(signal) {
       console.error('⚠️  Error stopping chat realtime listener:', err.message);
     }
 
-    // Close database pool if it exists
+    // Close database pools
     if (closePool) {
       await closePool();
       console.log('✅ Database pool closed');
     }
+    await closeAuthPool();
+    console.log('✅ Auth database pool closed');
 
     server.close(() => {
       console.log('✅ HTTP server closed');

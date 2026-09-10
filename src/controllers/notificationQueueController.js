@@ -302,6 +302,41 @@ async function getNotifications(req, res) {
   }
 }
 
+async function markAsRead(req, res) {
+  try {
+    const { queueUuid } = req.params;
+    const userId = req.query.user_id || req.user?.id;
+
+    if (!userId) {
+      return res.status(400).json({ success: false, message: 'user_id is required', error_code: 'VALIDATION_ERROR' });
+    }
+
+    const notification = await notificationQueueService.markAsRead(queueUuid, userId);
+    return res.status(200).json({ success: true, message: 'Notification marked as read', data: notification });
+  } catch (error) {
+    const status = error.message === 'Notification not found' ? 404 : 500;
+    return res.status(status).json({ success: false, message: error.message, error_code: status === 404 ? 'NOT_FOUND' : 'INTERNAL_ERROR' });
+  }
+}
+
+async function markAllAsRead(req, res) {
+  try {
+    const userId = req.body?.user_id || req.query.user_id || req.user?.id;
+    const tenantId = req.body?.tenant_id || req.query.tenant_id;
+
+    if (!userId || !tenantId) {
+      return res.status(400).json({ success: false, message: 'user_id and tenant_id are required', error_code: 'VALIDATION_ERROR' });
+    }
+
+    const result = await notificationQueueService.markAllAsRead(userId, parseInt(tenantId, 10));
+    return res.status(200).json({ success: true, message: 'All notifications marked as read', data: result });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error.message, error_code: 'INTERNAL_ERROR' });
+  }
+}
+
 module.exports = {
-  getNotifications
+  getNotifications,
+  markAsRead,
+  markAllAsRead
 };
