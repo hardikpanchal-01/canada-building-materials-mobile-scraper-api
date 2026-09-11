@@ -435,8 +435,9 @@ async function authenticateAndGenerateCode({ email, password, metadata = {} }) {
 async function exchangeCodeForUserInfo({ code, client_secret, device_info }) {
   try {
     // Return cached result for retried exchange (prevents CODE_CONSUMED on mobile retry)
+    // Only if the same client_secret is used (prevents stolen code replay with different secret)
     const cached = _exchangeCache.get(code);
-    if (cached && Date.now() - cached.ts < EXCHANGE_CACHE_TTL_MS) {
+    if (cached && Date.now() - cached.ts < EXCHANGE_CACHE_TTL_MS && cached.clientSecret === client_secret) {
       console.log('[ExchangeCode] Returning cached result for code (retry detected)');
       return cached.result;
     }
@@ -728,7 +729,7 @@ async function exchangeCodeForUserInfo({ code, client_secret, device_info }) {
     };
 
     // Cache successful result so mobile retries don't get CODE_CONSUMED
-    _exchangeCache.set(code, { result: successResult, ts: Date.now() });
+    _exchangeCache.set(code, { result: successResult, clientSecret: client_secret, ts: Date.now() });
 
     return successResult;
 
