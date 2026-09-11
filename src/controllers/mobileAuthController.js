@@ -154,6 +154,8 @@ async function login(req, res) {
       if (errorCode === 'TENANT_USER_INACTIVE') status = 403;
       if (errorCode === 'SERVER_ERROR') status = 500;
 
+      console.error(`[MobileAuth] login failed: email=${email}, error_code=${result.error_code}, message=${result.message}`);
+
       return res.status(status).json({
         success: false,
         error_code: result.error_code,
@@ -434,6 +436,8 @@ async function exchangeCode(req, res) {
       if (errorCode === 'INVALID_CLIENT') status = 401;
       if (errorCode === 'TENANT_SUSPENDED') status = 403;
       if (errorCode === 'SERVER_ERROR') status = 500;
+
+      console.error(`[MobileAuth] exchange-code failed: error_code=${result.error_code}, code=${code?.slice(0,8)}...`);
 
       return res.status(status).json({
         success: false,
