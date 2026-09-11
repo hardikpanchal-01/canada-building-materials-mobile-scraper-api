@@ -34,7 +34,9 @@ async function getDailyIntelligence(req, res) {
     query += ` ORDER BY report_date DESC LIMIT 50`;
 
     const result = await executeDirectSQL(query, params);
-    return res.json({ success: true, data: result.data || [] });
+    // Mobile app expects a single object for the matched scope, not an array
+    const rows = result.data || [];
+    return res.json({ success: true, data: rows[0] || null });
   } catch (error) {
     return res.status(500).json({ success: false, message: error.message });
   }
