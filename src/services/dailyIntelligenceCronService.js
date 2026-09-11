@@ -94,7 +94,7 @@ async function loadConfig() {
 // Shared WHERE clause for excluded_order_patterns
 const EXCLUSION_FILTERS = `
   AND EXISTS (SELECT 1 FROM order_products op1 WHERE op1.order_id = o.order_id)
-  AND EXISTS (SELECT 1 FROM order_products op2 WHERE op2.order_id = o.order_id AND op2.order_qty_unit = 'CY')
+  AND EXISTS (SELECT 1 FROM order_products op2 WHERE op2.order_id = o.order_id AND op2.order_qty_unit IN ('CY','m3'))
   AND NOT EXISTS (SELECT 1 FROM excluded_order_patterns eop WHERE eop.type='customer' AND eop.active=true AND LOWER(o.customer_name) LIKE '%'||LOWER(eop.pattern)||'%')
   AND NOT EXISTS (SELECT 1 FROM excluded_order_patterns eop WHERE eop.type='delivery_address' AND eop.active=true AND LOWER(o.delivery_addr1) LIKE '%'||LOWER(eop.pattern)||'%')
   AND NOT EXISTS (SELECT 1 FROM order_products op3 JOIN excluded_order_patterns eop ON eop.type='product' AND eop.active=true AND LOWER(op3.item_code) LIKE '%'||LOWER(eop.pattern)||'%' WHERE op3.order_id = o.order_id)`;
@@ -163,7 +163,7 @@ function computeLateOrders(orderRows, tickets, nowCdt, config) {
   for (const r of orderRows) {
     if (!ordersMap.has(r.order_id)) ordersMap.set(r.order_id, { order_id:r.order_id, order_code:r.order_code, current_status:r.current_status, removed:r.removed, remove_reason_code:r.remove_reason_code, customer_name:r.customer_name, plant_code:r.plant_code, start_time:r.start_time?normalizeToToday(r.start_time):null, delivery_rate_per_hour:r.delivery_rate_per_hour, ordered_qty:0, delv_qty:0 });
     const o = ordersMap.get(r.order_id);
-    if (r.is_mix && r.order_qty_unit === 'CY') { o.ordered_qty += parseFloat(r.order_qty||0); o.delv_qty += parseFloat(r.delv_qty||0); }
+    if (r.is_mix && (r.order_qty_unit === 'CY' || r.order_qty_unit === 'm3')) { o.ordered_qty += parseFloat(r.order_qty||0); o.delv_qty += parseFloat(r.delv_qty||0); }
     if (r.start_time) { const st = normalizeToToday(r.start_time); if (!o.start_time || st < o.start_time) { o.start_time = st; o.delivery_rate_per_hour = r.delivery_rate_per_hour; } }
   }
   const orderTickets = new Map();
