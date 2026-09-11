@@ -6,6 +6,7 @@ const {
   stopChatRealtimeListener,
 } = require('./src/services/chatRealtimeListener');
 const { initRealtime } = require('./src/services/realtimeService');
+const { startDailyIntelligenceCron, stopDailyIntelligenceCron } = require('./src/services/dailyIntelligenceCronService');
 
 const PORT = process.env.PORT || 3000;
 
@@ -112,6 +113,17 @@ const server = app.listen(PORT, async () => {
     }
   }
 
+  // Start Daily Intelligence cron (computes KPIs every 2 minutes)
+  if (process.env.DISABLE_DAILY_INTELLIGENCE !== 'true') {
+    try {
+      startDailyIntelligenceCron();
+    } catch (err) {
+      console.error('⚠️  Daily Intelligence cron failed to start:', err.message);
+    }
+  } else {
+    console.log('⏭️  Daily Intelligence cron disabled (DISABLE_DAILY_INTELLIGENCE=true)');
+  }
+
   console.log('✅ Server ready to accept connections');
   console.log('═══════════════════════════════════════════════════════');
 });
@@ -134,6 +146,9 @@ async function gracefulShutdown(signal) {
     } catch (err) {
       console.error('⚠️  Error stopping chat realtime listener:', err.message);
     }
+
+    // Stop daily intelligence cron
+    stopDailyIntelligenceCron();
 
     // Close database pool if it exists
     if (closePool) {
