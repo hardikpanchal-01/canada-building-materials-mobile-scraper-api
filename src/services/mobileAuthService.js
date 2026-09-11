@@ -20,6 +20,17 @@ const axios = require('axios');
 
 const AUTH_EXCHANGE_FALLBACK_URL = process.env.AUTH_EXCHANGE_FALLBACK_URL || '';
 
+// Short-lived cache for successful code exchanges so retries get the same
+// response instead of CODE_CONSUMED (mobile apps may retry on network hiccups).
+const _exchangeCache = new Map();
+const EXCHANGE_CACHE_TTL_MS = 30_000; // 30 seconds
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, entry] of _exchangeCache) {
+    if (now - entry.ts > EXCHANGE_CACHE_TTL_MS) _exchangeCache.delete(key);
+  }
+}, 60_000).unref();
+
 /**
  * Fallback: exchange auth code via the central auth API when the local
  * auth database (port-forwarded) is unavailable.
@@ -423,6 +434,13 @@ async function authenticateAndGenerateCode({ email, password, metadata = {} }) {
  */
 async function exchangeCodeForUserInfo({ code, client_secret, device_info }) {
   try {
+    // Return cached result for retried exchange (prevents CODE_CONSUMED on mobile retry)
+    const cached = _exchangeCache.get(code);
+    if (cached && Date.now() - cached.ts < EXCHANGE_CACHE_TTL_MS) {
+      console.log('[ExchangeCode] Returning cached result for code (retry detected)');
+      return cached.result;
+    }
+
     // Step 1: Get auth code record to find tenant_id
     const { getAuthCode } = require('./authCodeService');
     const authCode = await getAuthCode(code);
@@ -667,7 +685,7 @@ async function exchangeCodeForUserInfo({ code, client_secret, device_info }) {
     }
 
     // Step 11: Return user information in same format as existing login API
-    return {
+    const successResult = {
       success: true,
       user: {
         id: user.uuid,
@@ -708,6 +726,11 @@ async function exchangeCodeForUserInfo({ code, client_secret, device_info }) {
       accessToken,
       refreshToken
     };
+
+    // Cache successful result so mobile retries don't get CODE_CONSUMED
+    _exchangeCache.set(code, { result: successResult, ts: Date.now() });
+
+    return successResult;
 
   } catch (error) {
     console.error('Code exchange error:', error);
