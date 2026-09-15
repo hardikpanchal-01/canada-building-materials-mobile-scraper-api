@@ -102,7 +102,7 @@ function computeTruckRate(spacing) {
 }
 
 function getOrderUrl(orderId) {
-  const baseUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://dolese.truckast.ai';
+  const baseUrl = process.env.NEXT_PUBLIC_APP_URL || process.env.API_BASE_URL?.replace('-api', '') || 'https://cbm.truckast.ai';
   return `${baseUrl}/order-request/${orderId}`;
 }
 
