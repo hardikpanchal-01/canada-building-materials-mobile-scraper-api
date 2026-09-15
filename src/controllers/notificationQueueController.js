@@ -258,7 +258,8 @@ async function getNotifications(req, res) {
   try {
     const { user_id, tenant_id, page, limit } = req.query;
 
-    if (!user_id) {
+    const effectiveUserId = user_id || req.user?.id;
+    if (!effectiveUserId) {
       return res.status(400).json({
         success: false,
         message: 'user_id query parameter is required',
@@ -266,13 +267,11 @@ async function getNotifications(req, res) {
       });
     }
 
-    // tenant_id is optional — if not provided, fetch all tenants for this user
-
     const parsedPage = page ? parseInt(page, 10) : 1;
     const parsedLimit = limit ? parseInt(limit, 10) : 50;
     const tz = req.user?.timezone || null;
     const parsedTenantId = tenant_id ? parseInt(tenant_id, 10) : null;
-    const data = await notificationQueueService.getNotifications(user_id, parsedTenantId, parsedPage, parsedLimit);
+    const data = await notificationQueueService.getNotifications(effectiveUserId, parsedTenantId, parsedPage, parsedLimit);
 
     // Format timestamps in user's timezone
     if (tz && data.notifications) {
